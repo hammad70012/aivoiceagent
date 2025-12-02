@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 # 1. LOAD CONFIGURATION
 load_dotenv()
 
+# KEYS & URLS
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 AI_MODEL = os.getenv("AI_MODEL", "llama-3.3-70b-versatile") 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -22,22 +23,23 @@ if not GROQ_API_KEY:
     raise ValueError("❌ .env file missing or GROQ_API_KEY not found!")
 
 # 2. APP SETUP
-app = FastAPI(title="Groq Voice Agent", version="2.3.0")
+app = FastAPI(title="Groq Sales Agent", version="2.4.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# 3. INITIALIZE CLIENT
+# 3. CLIENT SETUP
 client = AsyncGroq(api_key=GROQ_API_KEY)
 
-# 4. INFRASTRUCTURE MANAGER
+# 4. INFRASTRUCTURE (DB & REDIS)
 class Infrastructure:
     def __init__(self):
         self.pool = None
         self.redis = None
 
     async def connect(self):
+        # Postgres
         try:
             self.pool = await asyncpg.create_pool(DATABASE_URL)
             print(f"✅ PostgreSQL Connected")
@@ -45,6 +47,7 @@ class Infrastructure:
         except Exception as e:
             print(f"❌ DB Connection Error: {e}")
 
+        # Redis
         try:
             self.redis = redis.from_url(REDIS_URL, decode_responses=True)
             print(f"✅ Redis Connected")
@@ -79,21 +82,26 @@ async def startup():
 async def shutdown():
     await infra.disconnect()
 
-# 5. INTELLIGENT LAYER
+# 5. INTELLIGENT LAYER (SALES PERSONA)
 async def process_conversation(session_id: str, user_text: str):
-    history_key = f"groq_chat:{session_id}"
+    history_key = f"groq_sales_chat:{session_id}"
     raw_history = await infra.redis.get(history_key)
     
-    # IMPROVED SYSTEM PROMPT FOR QUALITY
+    # --- SALES SYSTEM PROMPT ---
+    # This instructs the AI to act like a human closer.
+    system_prompt = (
+        "You are Alex, a senior sales executive. "
+        "Your goal is to have a natural, spoken conversation with the user to qualify them as a lead and eventually book a meeting or close a deal. "
+        "RULES:"
+        "1. Speak like a human, not a machine. Be professional but warm."
+        "2. Keep responses SHORT (1-2 sentences maximum). Long answers are bad for voice chat."
+        "3. Ask only ONE question at a time to keep the conversation flowing."
+        "4. If the user greets you, introduce yourself briefly and ask how you can help."
+        "5. Your English must be flawless and professional."
+    )
+
     messages = json.loads(raw_history) if raw_history else [
-        {
-            "role": "system", 
-            "content": (
-                "You are an advanced, highly intelligent voice assistant. "
-                "Your responses must be in perfect, high-quality English. "
-                "Keep responses concise (1-2 sentences) but engaging, polite, and helpful for a spoken conversation."
-            )
-        }
+        {"role": "system", "content": system_prompt}
     ]
     
     messages.append({"role": "user", "content": user_text})
@@ -102,19 +110,20 @@ async def process_conversation(session_id: str, user_text: str):
         completion = await client.chat.completions.create(
             model=AI_MODEL,
             messages=messages,
-            temperature=0.6, # Slightly lower temperature for more coherent English
-            max_tokens=250, 
+            temperature=0.7, # Slightly higher for more natural human variance
+            max_tokens=150,  # Keep it short
         )
         ai_response_content = completion.choices[0].message.content
 
     except Exception as e:
         print(f"API Error: {e}")
-        return f"I encountered an error: {str(e)}"
+        return "I'm having trouble hearing you clearly, could you repeat that?"
 
-    assistant_msg = {"role": "assistant", "content": ai_response_content}
-    messages.append(assistant_msg)
-    
+    # Update Memory
+    messages.append({"role": "assistant", "content": ai_response_content})
     await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
+    
+    # Log to DB
     asyncio.create_task(save_log(session_id, user_text, ai_response_content))
     
     return ai_response_content
@@ -132,19 +141,23 @@ async def save_log(session_id, user, ai):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     session_id = str(id(websocket))
-    print(f"🔗 Call Started: {session_id}")
+    print(f"🔗 Lead Connected: {session_id}")
     
     try:
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
+            
+            # Process with Sales Logic
             response = await process_conversation(session_id, data)
+            
+            # Send back to UI
             await websocket.send_text(response)
             
     except WebSocketDisconnect:
-        print(f"📴 Call Ended: {session_id}")
+        print(f"📴 Lead Disconnected: {session_id}")
 
-# 7. REACT UI (Improved Logic)
+# 7. FRONTEND (Refined for Continuous Conversation)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -152,7 +165,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Groq Voice AI</title>
+    <title>AI Sales Agent</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -160,31 +173,46 @@ async def serve_ui():
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         body { background: #0f172a; color: #fff; font-family: 'Segoe UI', sans-serif; }
-        .glow-text { text-shadow: 0 0 20px rgba(249, 115, 22, 0.5); }
+        .glow-text { text-shadow: 0 0 20px rgba(56, 189, 248, 0.5); }
         .orb-container {
-            width: 150px; height: 150px;
+            width: 160px; height: 160px;
             border-radius: 50%;
-            background: radial-gradient(circle, #331f16 0%, #1a0f0a 100%);
-            border: 2px solid #552b1b;
+            background: radial-gradient(circle, #0f2e4a 0%, #020617 100%);
+            border: 2px solid #1e3a8a;
             display: flex; align-items: center; justify-content: center;
             cursor: pointer;
             transition: all 0.4s ease;
-            box-shadow: 0 0 30px rgba(249, 115, 22, 0.1);
-            user-select: none;
+            box-shadow: 0 0 30px rgba(56, 189, 248, 0.1);
+            position: relative;
+            z-index: 10;
         }
-        .orb-container:hover { transform: scale(1.05); border-color: #f97316; }
+        .orb-container:hover { transform: scale(1.05); border-color: #38bdf8; }
+        
+        /* LISTENING STATE (RED) */
         .orb-container.listening {
             border-color: #ef4444;
+            background: radial-gradient(circle, #450a0a 0%, #020617 100%);
             box-shadow: 0 0 50px rgba(239, 68, 68, 0.4);
             animation: pulse-red 1.5s infinite;
         }
+        
+        /* SPEAKING STATE (GREEN/BLUE) */
         .orb-container.speaking {
-            border-color: #f97316;
-            box-shadow: 0 0 50px rgba(249, 115, 22, 0.4);
-            animation: pulse-orange 1.5s infinite;
+            border-color: #22c55e;
+            background: radial-gradient(circle, #052e16 0%, #020617 100%);
+            box-shadow: 0 0 50px rgba(34, 197, 94, 0.4);
+            animation: pulse-green 1.5s infinite;
         }
+
+        /* PROCESSING STATE */
+        .orb-container.processing {
+            border-color: #f59e0b;
+            animation: spin 1s linear infinite;
+        }
+
         @keyframes pulse-red { 0% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);} 100% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);} }
-        @keyframes pulse-orange { 0% {box-shadow: 0 0 0 0 rgba(249, 115, 22, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(249, 115, 22, 0);} 100% {box-shadow: 0 0 0 0 rgba(249, 115, 22, 0);} }
+        @keyframes pulse-green { 0% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(34, 197, 94, 0);} 100% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);} }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body class="h-screen flex items-center justify-center overflow-hidden">
@@ -192,122 +220,130 @@ async def serve_ui():
 
     <script type="text/babel">
         function App() {
-            const [status, setStatus] = React.useState("Offline");
-            // Mode: idle, listening, processing, speaking
+            const [status, setStatus] = React.useState("Disconnected");
+            // Modes: 'idle', 'listening', 'processing', 'speaking'
             const [mode, setMode] = React.useState("idle");
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
             
-            // Refs to manage state inside event listeners without closure issues
+            // Refs for state management inside callbacks
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
-            const isUserIntentListening = React.useRef(false); // Tracks if the user WANTs it listening
+            const isConversationActive = React.useRef(false); // Master switch
 
             React.useEffect(() => {
-                // Initialize WebSocket
+                // 1. WebSocket Setup
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
                 ws.current = new WebSocket(protocol + window.location.host + "/ws");
                 
-                ws.current.onopen = () => setStatus("Online");
-                ws.current.onclose = () => setStatus("Offline");
+                ws.current.onopen = () => setStatus("Connected");
+                ws.current.onclose = () => setStatus("Disconnected");
                 
                 ws.current.onmessage = (e) => {
                     const text = e.data;
                     setResponse(text);
-                    speak(text);
+                    speakResponse(text);
                 };
 
-                // Initialize Speech Recognition
-                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-                if (SpeechRecognition) {
+                // 2. Speech Recognition Setup
+                if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
-                    recognition.current.continuous = true; // Key change: Keep listening
+                    recognition.current.continuous = true; 
                     recognition.current.interimResults = false;
                     recognition.current.lang = 'en-US';
 
                     recognition.current.onstart = () => {
-                        console.log("Mic started");
-                        if(isUserIntentListening.current) setMode("listening");
+                        if (isConversationActive.current) setMode("listening");
                     };
 
                     recognition.current.onend = () => {
-                        console.log("Mic stopped");
-                        // If user wants it listening but it stopped (e.g. silence timeout), restart it
-                        if (isUserIntentListening.current && mode !== "speaking") {
-                            console.log("Restarting mic...");
+                        // If we shouldn't be stopped, restart
+                        if (isConversationActive.current && mode !== "speaking" && mode !== "processing") {
                             try { recognition.current.start(); } catch(e) {}
-                        } else if (!isUserIntentListening.current) {
+                        } else if (!isConversationActive.current) {
                             setMode("idle");
                         }
                     };
 
-                    recognition.current.onresult = (e) => {
-                        const current = e.resultIndex;
-                        const text = e.results[current][0].transcript;
-                        if(text.trim()) {
+                    recognition.current.onresult = (event) => {
+                        // Get the latest result
+                        const resultsLength = event.results.length - 1;
+                        const text = event.results[resultsLength][0].transcript;
+                        
+                        if (text.trim() && isConversationActive.current) {
                             setTranscript(text);
                             setMode("processing");
                             
-                            // Stop mic strictly to avoid hearing self, will restart after speak
-                            recognition.current.stop(); 
+                            // Stop mic temporarily so it doesn't hear itself
+                            recognition.current.stop();
                             
+                            // Send to AI
                             ws.current.send(text);
                         }
                     };
+                } else {
+                    alert("Browser not supported. Please use Chrome.");
                 }
 
                 return () => {
-                    if(ws.current) ws.current.close();
-                }
-            }, []);
+                    if (ws.current) ws.current.close();
+                };
+            }, [mode]);
 
-            // Helper to get the best sounding English voice
-            const getBestVoice = (voices) => {
-                // Priority list for "Good Accent"
-                const priorities = ["Google US English", "Microsoft Zira", "Natural", "Premium"];
-                
-                for (let p of priorities) {
-                    const found = voices.find(v => v.name.includes(p) && v.lang.startsWith("en"));
-                    if (found) return found;
-                }
-                return voices.find(v => v.lang.startsWith("en")) || voices[0];
-            };
-
-            const speak = (text) => {
+            // 3. Voice Logic (English Accent)
+            const speakResponse = (text) => {
                 setMode("speaking");
+                const synth = window.speechSynthesis;
                 const utterance = new SpeechSynthesisUtterance(text);
-                const voices = window.speechSynthesis.getVoices();
                 
-                utterance.voice = getBestVoice(voices);
-                utterance.rate = 1.0; 
+                // Get voices and select best English one
+                let voices = synth.getVoices();
+                // If voices aren't loaded yet, wait for them (Chrome quirk)
+                if (!voices.length) {
+                    synth.onvoiceschanged = () => {
+                        voices = synth.getVoices();
+                        utterance.voice = selectVoice(voices);
+                        synth.speak(utterance);
+                    };
+                } else {
+                    utterance.voice = selectVoice(voices);
+                    synth.speak(utterance);
+                }
+
+                utterance.rate = 1.05; // Slightly faster for sales
                 utterance.pitch = 1.0;
 
                 utterance.onend = () => {
-                    // Resume listening if intent is still true
-                    if (isUserIntentListening.current) {
+                    if (isConversationActive.current) {
                         setMode("listening");
                         try { recognition.current.start(); } catch(e) {}
                     } else {
                         setMode("idle");
                     }
                 };
-
-                window.speechSynthesis.speak(utterance);
             };
 
-            const toggleMic = () => {
-                if (isUserIntentListening.current) {
-                    // Turn OFF
-                    isUserIntentListening.current = false;
+            const selectVoice = (voices) => {
+                // Priority: Google US English -> Microsoft Zira -> Any English
+                return voices.find(v => v.name === "Google US English") || 
+                       voices.find(v => v.name.includes("Zira")) ||
+                       voices.find(v => v.lang.startsWith("en-US")) || 
+                       voices[0];
+            };
+
+            // 4. Main Interaction Toggle
+            const toggleConversation = () => {
+                if (isConversationActive.current) {
+                    // Stop everything
+                    isConversationActive.current = false;
                     recognition.current.stop();
-                    window.speechSynthesis.cancel(); // Stop talking if talking
+                    window.speechSynthesis.cancel();
                     setMode("idle");
                 } else {
-                    // Turn ON
-                    isUserIntentListening.current = true;
+                    // Start everything
+                    isConversationActive.current = true;
                     setMode("listening");
-                    // Ensure voices are loaded (Chrome quirk)
-                    window.speechSynthesis.getVoices();
                     try { recognition.current.start(); } catch(e) {}
                 }
             };
@@ -315,34 +351,40 @@ async def serve_ui():
             return (
                 <div className="flex flex-col items-center">
                     
-                    <div className="mb-10 text-center">
-                        <h1 className="text-3xl font-bold glow-text tracking-widest">GROQ AI</h1>
-                        <p className="text-gray-400 text-sm mt-2 uppercase tracking-widest">{status}</p>
-                        <p className="text-xs text-orange-500 mt-1">
-                            {mode === 'listening' ? 'Listening...' : 
-                             mode === 'speaking' ? 'Speaking...' : 
-                             mode === 'processing' ? 'Thinking...' : 'Tap to Start'}
-                        </p>
+                    <div className="mb-12 text-center">
+                        <h1 className="text-4xl font-bold glow-text tracking-widest text-sky-400">SALES AGENT</h1>
+                        <p className="text-gray-500 text-sm mt-3 uppercase tracking-widest font-semibold">{status}</p>
                     </div>
 
-                    <div className={`orb-container ${mode}`} onClick={toggleMic}>
-                        <i className={`fas fa-${mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'volume-up' : mode === 'processing' ? 'bolt' : 'power-off'} text-4xl text-white`}></i>
+                    <div className={`orb-container ${mode}`} onClick={toggleConversation}>
+                        <i className={`fas fa-${
+                            mode === 'listening' ? 'microphone' : 
+                            mode === 'speaking' ? 'comments' : 
+                            mode === 'processing' ? 'sync' : 'power-off'
+                        } text-5xl text-white`}></i>
                     </div>
 
-                    <div className="w-full mt-12 p-6 bg-slate-900 bg-opacity-80 rounded-xl border border-slate-700 min-h-[200px] flex flex-col justify-end shadow-2xl">
+                    <div className="mt-8 text-center h-8">
+                        {mode === 'listening' && <span className="text-red-400 animate-pulse font-mono">LISTENING...</span>}
+                        {mode === 'speaking' && <span className="text-green-400 animate-pulse font-mono">AGENT SPEAKING...</span>}
+                        {mode === 'processing' && <span className="text-amber-400 animate-pulse font-mono">PROCESSING...</span>}
+                        {mode === 'idle' && <span className="text-gray-600 font-mono">TAP TO START CALL</span>}
+                    </div>
+
+                    <div className="w-full max-w-md mt-8 p-6 bg-slate-900 bg-opacity-90 rounded-xl border border-slate-800 min-h-[150px] flex flex-col justify-end shadow-2xl">
                         {transcript && (
-                            <div className="self-end bg-slate-800 text-gray-200 px-4 py-2 rounded-lg mb-3 max-w-[80%] text-sm">
+                            <div className="self-end bg-slate-800 text-sky-100 px-4 py-2 rounded-2xl rounded-tr-none mb-3 max-w-[85%] text-sm shadow-md">
                                 {transcript}
                             </div>
                         )}
                         {response && (
-                            <div className="self-start text-orange-400 font-medium text-lg leading-relaxed animate-pulse">
+                            <div className="self-start text-white font-medium text-lg leading-relaxed">
                                 {response}
                             </div>
                         )}
                         {!transcript && !response && (
-                            <div className="text-center text-gray-600 text-sm italic">
-                                "Tap the orb to start a continuous conversation."
+                            <div className="text-center text-gray-700 text-sm italic">
+                                Ready to close leads. Click the button to begin.
                             </div>
                         )}
                     </div>
