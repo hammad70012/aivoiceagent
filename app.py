@@ -268,7 +268,7 @@ async def serve_ui():
                     <div className="mb-10 text-center">
                         <h1 className="text-3xl font-bold glow-text tracking-widest">GROQ AI</h1>
                         <p className="text-gray-400 text-sm mt-2 uppercase tracking-widest">{status}</p>
-                        <p className="text-xs text-orange-500 mt-1">Llama 3.3 70B</p>
+                        <p className="text-xs text-orange-500 mt-1">Service agent</p>
                     </div>
 
                     <div className={`orb-container ${mode}`} onClick={toggleMic}>
