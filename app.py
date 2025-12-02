@@ -5,7 +5,8 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from openai import AsyncOpenAI
+# 1. CHANGED: Import Groq Async Client
+from groq import AsyncGroq
 import redis.asyncio as redis
 import asyncpg
 from dotenv import load_dotenv
@@ -13,30 +14,26 @@ from dotenv import load_dotenv
 # 1. LOAD CONFIGURATION
 load_dotenv()
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-# Defaulting to a model that supports reasoning/chain of thought
-AI_MODEL = os.getenv("AI_MODEL", "x-ai/grok-2-1212") 
+# 2. CHANGED: Use GROQ_API_KEY
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# Defaulting to the model requested
+AI_MODEL = os.getenv("AI_MODEL", "llama-3.3-70b-versatile") 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 
-if not OPENROUTER_API_KEY:
-    raise ValueError("❌ .env file missing or OPENROUTER_API_KEY not found!")
+if not GROQ_API_KEY:
+    raise ValueError("❌ .env file missing or GROQ_API_KEY not found!")
 
 # 2. APP SETUP
-app = FastAPI(title="Grok Voice Agent", version="2.1.0")
+app = FastAPI(title="Groq Voice Agent", version="2.2.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# OpenRouter Client Configuration
-client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-    default_headers={
-        "HTTP-Referer": "http://localhost:8000",
-        "X-Title": "Voice Agent App",
-    }
+# 3. CHANGED: Initialize AsyncGroq Client
+client = AsyncGroq(
+    api_key=GROQ_API_KEY,
 )
 
 # 3. INFRASTRUCTURE MANAGER (DB & REDIS)
@@ -62,17 +59,18 @@ class Infrastructure:
             print(f"❌ Redis Error: {e}")
 
     async def init_db(self):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS conversation_logs (
-                    id SERIAL PRIMARY KEY,
-                    session_id TEXT,
-                    user_msg TEXT,
-                    ai_msg TEXT,
-                    model_used TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
+        if self.pool:
+            async with self.pool.acquire() as conn:
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS conversation_logs (
+                        id SERIAL PRIMARY KEY,
+                        session_id TEXT,
+                        user_msg TEXT,
+                        ai_msg TEXT,
+                        model_used TEXT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
 
     async def disconnect(self):
         if self.pool: await self.pool.close()
@@ -88,10 +86,10 @@ async def startup():
 async def shutdown():
     await infra.disconnect()
 
-# 4. INTELLIGENT LAYER (Grok via OpenRouter with Reasoning)
+# 4. INTELLIGENT LAYER (Groq Implementation)
 async def process_conversation(session_id: str, user_text: str):
     # A. Retrieve Context from Redis (Memory)
-    history_key = f"grok_chat:{session_id}"
+    history_key = f"groq_chat:{session_id}"
     raw_history = await infra.redis.get(history_key)
     
     messages = json.loads(raw_history) if raw_history else [
@@ -101,42 +99,32 @@ async def process_conversation(session_id: str, user_text: str):
     # B. Add User Input
     messages.append({"role": "user", "content": user_text})
     
-    # C. Call OpenRouter (Grok) with Reasoning Enabled
+    # C. Call Groq API
     try:
+        # CHANGED: Native Groq call
         completion = await client.chat.completions.create(
             model=AI_MODEL,
             messages=messages,
             temperature=0.7,
-            max_tokens=250, # Increased slightly to allow for reasoning overhead if needed
-            extra_body={"reasoning": {"enabled": True}} # <--- NEW REASONING FLAG
+            max_tokens=250, 
         )
         
         # Extract the message object
-        response_message = completion.choices[0].message
-        ai_response_content = response_message.content
-        
-        # Check for reasoning details (to pass back next time)
-        # Note: Depending on the SDK version and OpenRouter response, this might be accessed directly or via extra fields
-        reasoning_details = getattr(response_message, "reasoning_details", None)
+        ai_response_content = completion.choices[0].message.content
 
     except Exception as e:
         print(f"API Error: {e}")
-        return f"I encountered an error connecting to Grok: {str(e)}"
+        return f"I encountered an error connecting to Groq: {str(e)}"
 
     # D. Update Memory (Redis) - Expires in 1 hour
-    # We construct the assistant message manually to include reasoning_details if present
     assistant_msg = {
         "role": "assistant", 
         "content": ai_response_content
     }
-    
-    # Store reasoning details so the model preserves its thought process in the next turn
-    if reasoning_details:
-        assistant_msg["reasoning_details"] = reasoning_details
 
     messages.append(assistant_msg)
     
-    # Save to Redis (using default=str to handle any non-serializable objects)
+    # Save to Redis
     await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
     
     # E. Save Log to Postgres (Async)
@@ -173,7 +161,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         print(f"📴 Call Ended: {session_id}")
 
-# 6. REACT UI (Served via FastAPI)
+# 6. REACT UI (Updated Branding)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -181,38 +169,38 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Grok Voice AI (Reasoning Enabled)</title>
+    <title>Groq Voice AI (Llama 3.3)</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
-        body { background: #000; color: #fff; font-family: 'Segoe UI', sans-serif; }
-        .glow-text { text-shadow: 0 0 20px rgba(59, 130, 246, 0.5); }
+        body { background: #0f172a; color: #fff; font-family: 'Segoe UI', sans-serif; }
+        .glow-text { text-shadow: 0 0 20px rgba(249, 115, 22, 0.5); }
         .orb-container {
             width: 150px; height: 150px;
             border-radius: 50%;
-            background: radial-gradient(circle, #222 0%, #000 100%);
-            border: 2px solid #333;
+            background: radial-gradient(circle, #331f16 0%, #1a0f0a 100%);
+            border: 2px solid #552b1b;
             display: flex; align-items: center; justify-content: center;
             cursor: pointer;
             transition: all 0.4s ease;
-            box-shadow: 0 0 30px rgba(255, 255, 255, 0.05);
+            box-shadow: 0 0 30px rgba(249, 115, 22, 0.1);
         }
-        .orb-container:hover { transform: scale(1.05); border-color: #666; }
+        .orb-container:hover { transform: scale(1.05); border-color: #f97316; }
         .orb-container.listening {
             border-color: #ef4444;
             box-shadow: 0 0 50px rgba(239, 68, 68, 0.4);
             animation: pulse-red 1.5s infinite;
         }
         .orb-container.speaking {
-            border-color: #3b82f6;
-            box-shadow: 0 0 50px rgba(59, 130, 246, 0.4);
-            animation: pulse-blue 1.5s infinite;
+            border-color: #f97316;
+            box-shadow: 0 0 50px rgba(249, 115, 22, 0.4);
+            animation: pulse-orange 1.5s infinite;
         }
         @keyframes pulse-red { 0% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);} 100% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);} }
-        @keyframes pulse-blue { 0% {box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(59, 130, 246, 0);} 100% {box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);} }
+        @keyframes pulse-orange { 0% {box-shadow: 0 0 0 0 rgba(249, 115, 22, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(249, 115, 22, 0);} 100% {box-shadow: 0 0 0 0 rgba(249, 115, 22, 0);} }
     </style>
 </head>
 <body class="h-screen flex items-center justify-center overflow-hidden">
@@ -258,8 +246,9 @@ async def serve_ui():
                 setMode("speaking");
                 const utterance = new SpeechSynthesisUtterance(text);
                 const voices = window.speechSynthesis.getVoices();
+                // Prefer a faster voice for Groq speed
                 utterance.voice = voices.find(v => v.name.includes("Google US English")) || voices[0]; 
-                utterance.rate = 1.0;
+                utterance.rate = 1.1; 
                 utterance.onend = () => setMode("idle");
                 window.speechSynthesis.speak(utterance);
             };
@@ -277,28 +266,29 @@ async def serve_ui():
                 <div className="flex flex-col items-center">
                     
                     <div className="mb-10 text-center">
-                        <h1 className="text-3xl font-bold glow-text tracking-widest">GROK AI</h1>
-                        <p className="text-gray-500 text-sm mt-2 uppercase tracking-widest">{status}</p>
+                        <h1 className="text-3xl font-bold glow-text tracking-widest">GROQ AI</h1>
+                        <p className="text-gray-400 text-sm mt-2 uppercase tracking-widest">{status}</p>
+                        <p className="text-xs text-orange-500 mt-1">Llama 3.3 70B</p>
                     </div>
 
                     <div className={`orb-container ${mode}`} onClick={toggleMic}>
-                        <i className={`fas fa-${mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'wave-square' : 'power-off'} text-4xl text-white`}></i>
+                        <i className={`fas fa-${mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'bolt' : 'power-off'} text-4xl text-white`}></i>
                     </div>
 
-                    <div className="w-full mt-12 p-6 bg-gray-900 bg-opacity-50 rounded-xl border border-gray-800 min-h-[200px] flex flex-col justify-end">
+                    <div className="w-full mt-12 p-6 bg-slate-900 bg-opacity-80 rounded-xl border border-slate-700 min-h-[200px] flex flex-col justify-end shadow-2xl">
                         {transcript && (
-                            <div className="self-end bg-gray-800 text-gray-200 px-4 py-2 rounded-lg mb-3 max-w-[80%] text-sm">
+                            <div className="self-end bg-slate-800 text-gray-200 px-4 py-2 rounded-lg mb-3 max-w-[80%] text-sm">
                                 {transcript}
                             </div>
                         )}
                         {response && (
-                            <div className="self-start text-blue-400 font-medium text-lg leading-relaxed animate-pulse">
+                            <div className="self-start text-orange-400 font-medium text-lg leading-relaxed animate-pulse">
                                 {response}
                             </div>
                         )}
                         {!transcript && !response && (
                             <div className="text-center text-gray-600 text-sm italic">
-                                "Tap the orb to speak with xAI..."
+                                "Tap the orb to speak with Llama 3..."
                             </div>
                         )}
                     </div>
