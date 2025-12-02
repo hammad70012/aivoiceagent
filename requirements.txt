@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+websockets
+redis
+asyncpg
+groq
+python-dotenv
+jinja2
