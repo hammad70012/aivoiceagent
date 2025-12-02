@@ -5,7 +5,6 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-# 1. CHANGED: Import Groq Async Client
 from groq import AsyncGroq
 import redis.asyncio as redis
 import asyncpg
@@ -14,9 +13,7 @@ from dotenv import load_dotenv
 # 1. LOAD CONFIGURATION
 load_dotenv()
 
-# 2. CHANGED: Use GROQ_API_KEY
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-# Defaulting to the model requested
 AI_MODEL = os.getenv("AI_MODEL", "llama-3.3-70b-versatile") 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
@@ -25,25 +22,22 @@ if not GROQ_API_KEY:
     raise ValueError("❌ .env file missing or GROQ_API_KEY not found!")
 
 # 2. APP SETUP
-app = FastAPI(title="Groq Voice Agent", version="2.2.0")
+app = FastAPI(title="Groq Voice Agent", version="2.3.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# 3. CHANGED: Initialize AsyncGroq Client
-client = AsyncGroq(
-    api_key=GROQ_API_KEY,
-)
+# 3. INITIALIZE CLIENT
+client = AsyncGroq(api_key=GROQ_API_KEY)
 
-# 3. INFRASTRUCTURE MANAGER (DB & REDIS)
+# 4. INFRASTRUCTURE MANAGER
 class Infrastructure:
     def __init__(self):
         self.pool = None
         self.redis = None
 
     async def connect(self):
-        # Postgres Connection
         try:
             self.pool = await asyncpg.create_pool(DATABASE_URL)
             print(f"✅ PostgreSQL Connected")
@@ -51,7 +45,6 @@ class Infrastructure:
         except Exception as e:
             print(f"❌ DB Connection Error: {e}")
 
-        # Redis Connection
         try:
             self.redis = redis.from_url(REDIS_URL, decode_responses=True)
             print(f"✅ Redis Connected")
@@ -86,48 +79,42 @@ async def startup():
 async def shutdown():
     await infra.disconnect()
 
-# 4. INTELLIGENT LAYER (Groq Implementation)
+# 5. INTELLIGENT LAYER
 async def process_conversation(session_id: str, user_text: str):
-    # A. Retrieve Context from Redis (Memory)
     history_key = f"groq_chat:{session_id}"
     raw_history = await infra.redis.get(history_key)
     
+    # IMPROVED SYSTEM PROMPT FOR QUALITY
     messages = json.loads(raw_history) if raw_history else [
-        {"role": "system", "content": "You are a witty and helpful voice assistant. Keep responses extremely concise (1-2 sentences) suitable for speech."}
+        {
+            "role": "system", 
+            "content": (
+                "You are an advanced, highly intelligent voice assistant. "
+                "Your responses must be in perfect, high-quality English. "
+                "Keep responses concise (1-2 sentences) but engaging, polite, and helpful for a spoken conversation."
+            )
+        }
     ]
     
-    # B. Add User Input
     messages.append({"role": "user", "content": user_text})
     
-    # C. Call Groq API
     try:
-        # CHANGED: Native Groq call
         completion = await client.chat.completions.create(
             model=AI_MODEL,
             messages=messages,
-            temperature=0.7,
+            temperature=0.6, # Slightly lower temperature for more coherent English
             max_tokens=250, 
         )
-        
-        # Extract the message object
         ai_response_content = completion.choices[0].message.content
 
     except Exception as e:
         print(f"API Error: {e}")
-        return f"I encountered an error connecting to Groq: {str(e)}"
+        return f"I encountered an error: {str(e)}"
 
-    # D. Update Memory (Redis) - Expires in 1 hour
-    assistant_msg = {
-        "role": "assistant", 
-        "content": ai_response_content
-    }
-
+    assistant_msg = {"role": "assistant", "content": ai_response_content}
     messages.append(assistant_msg)
     
-    # Save to Redis
     await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
-    
-    # E. Save Log to Postgres (Async)
     asyncio.create_task(save_log(session_id, user_text, ai_response_content))
     
     return ai_response_content
@@ -140,7 +127,7 @@ async def save_log(session_id, user, ai):
                 session_id, user, ai, AI_MODEL
             )
 
-# 5. WEBSOCKET HANDLER
+# 6. WEBSOCKET HANDLER
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -151,17 +138,13 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
-            
-            # Processing
             response = await process_conversation(session_id, data)
-            
-            # Send back
             await websocket.send_text(response)
             
     except WebSocketDisconnect:
         print(f"📴 Call Ended: {session_id}")
 
-# 6. REACT UI (Updated Branding)
+# 7. REACT UI (Improved Logic)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -169,7 +152,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Groq Voice AI (Llama 3.3)</title>
+    <title>Groq Voice AI</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -187,6 +170,7 @@ async def serve_ui():
             cursor: pointer;
             transition: all 0.4s ease;
             box-shadow: 0 0 30px rgba(249, 115, 22, 0.1);
+            user-select: none;
         }
         .orb-container:hover { transform: scale(1.05); border-color: #f97316; }
         .orb-container.listening {
@@ -209,15 +193,18 @@ async def serve_ui():
     <script type="text/babel">
         function App() {
             const [status, setStatus] = React.useState("Offline");
+            // Mode: idle, listening, processing, speaking
             const [mode, setMode] = React.useState("idle");
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
-            const ws = React.useRef(null);
             
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            const recognition = React.useRef(new SpeechRecognition());
+            // Refs to manage state inside event listeners without closure issues
+            const ws = React.useRef(null);
+            const recognition = React.useRef(null);
+            const isUserIntentListening = React.useRef(false); // Tracks if the user WANTs it listening
 
             React.useEffect(() => {
+                // Initialize WebSocket
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
                 ws.current = new WebSocket(protocol + window.location.host + "/ws");
                 
@@ -225,40 +212,103 @@ async def serve_ui():
                 ws.current.onclose = () => setStatus("Offline");
                 
                 ws.current.onmessage = (e) => {
-                    setResponse(e.data);
-                    speak(e.data);
+                    const text = e.data;
+                    setResponse(text);
+                    speak(text);
                 };
 
-                recognition.current.continuous = false;
-                recognition.current.lang = 'en-US';
-                recognition.current.onstart = () => setMode("listening");
-                recognition.current.onend = () => { if(mode === "listening") setMode("idle"); };
-                recognition.current.onresult = (e) => {
-                    const text = e.results[0][0].transcript;
-                    setTranscript(text);
-                    setMode("processing");
-                    ws.current.send(text);
-                };
+                // Initialize Speech Recognition
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (SpeechRecognition) {
+                    recognition.current = new SpeechRecognition();
+                    recognition.current.continuous = true; // Key change: Keep listening
+                    recognition.current.interimResults = false;
+                    recognition.current.lang = 'en-US';
 
+                    recognition.current.onstart = () => {
+                        console.log("Mic started");
+                        if(isUserIntentListening.current) setMode("listening");
+                    };
+
+                    recognition.current.onend = () => {
+                        console.log("Mic stopped");
+                        // If user wants it listening but it stopped (e.g. silence timeout), restart it
+                        if (isUserIntentListening.current && mode !== "speaking") {
+                            console.log("Restarting mic...");
+                            try { recognition.current.start(); } catch(e) {}
+                        } else if (!isUserIntentListening.current) {
+                            setMode("idle");
+                        }
+                    };
+
+                    recognition.current.onresult = (e) => {
+                        const current = e.resultIndex;
+                        const text = e.results[current][0].transcript;
+                        if(text.trim()) {
+                            setTranscript(text);
+                            setMode("processing");
+                            
+                            // Stop mic strictly to avoid hearing self, will restart after speak
+                            recognition.current.stop(); 
+                            
+                            ws.current.send(text);
+                        }
+                    };
+                }
+
+                return () => {
+                    if(ws.current) ws.current.close();
+                }
             }, []);
+
+            // Helper to get the best sounding English voice
+            const getBestVoice = (voices) => {
+                // Priority list for "Good Accent"
+                const priorities = ["Google US English", "Microsoft Zira", "Natural", "Premium"];
+                
+                for (let p of priorities) {
+                    const found = voices.find(v => v.name.includes(p) && v.lang.startsWith("en"));
+                    if (found) return found;
+                }
+                return voices.find(v => v.lang.startsWith("en")) || voices[0];
+            };
 
             const speak = (text) => {
                 setMode("speaking");
                 const utterance = new SpeechSynthesisUtterance(text);
                 const voices = window.speechSynthesis.getVoices();
-                // Prefer a faster voice for Groq speed
-                utterance.voice = voices.find(v => v.name.includes("Google US English")) || voices[0]; 
-                utterance.rate = 1.1; 
-                utterance.onend = () => setMode("idle");
+                
+                utterance.voice = getBestVoice(voices);
+                utterance.rate = 1.0; 
+                utterance.pitch = 1.0;
+
+                utterance.onend = () => {
+                    // Resume listening if intent is still true
+                    if (isUserIntentListening.current) {
+                        setMode("listening");
+                        try { recognition.current.start(); } catch(e) {}
+                    } else {
+                        setMode("idle");
+                    }
+                };
+
                 window.speechSynthesis.speak(utterance);
             };
 
             const toggleMic = () => {
-                if (mode === "listening") {
+                if (isUserIntentListening.current) {
+                    // Turn OFF
+                    isUserIntentListening.current = false;
                     recognition.current.stop();
+                    window.speechSynthesis.cancel(); // Stop talking if talking
                     setMode("idle");
                 } else {
-                    recognition.current.start();
+                    // Turn ON
+                    isUserIntentListening.current = true;
+                    setMode("listening");
+                    // Ensure voices are loaded (Chrome quirk)
+                    window.speechSynthesis.getVoices();
+                    try { recognition.current.start(); } catch(e) {}
                 }
             };
 
@@ -268,11 +318,15 @@ async def serve_ui():
                     <div className="mb-10 text-center">
                         <h1 className="text-3xl font-bold glow-text tracking-widest">GROQ AI</h1>
                         <p className="text-gray-400 text-sm mt-2 uppercase tracking-widest">{status}</p>
-                        <p className="text-xs text-orange-500 mt-1">Service agent</p>
+                        <p className="text-xs text-orange-500 mt-1">
+                            {mode === 'listening' ? 'Listening...' : 
+                             mode === 'speaking' ? 'Speaking...' : 
+                             mode === 'processing' ? 'Thinking...' : 'Tap to Start'}
+                        </p>
                     </div>
 
                     <div className={`orb-container ${mode}`} onClick={toggleMic}>
-                        <i className={`fas fa-${mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'bolt' : 'power-off'} text-4xl text-white`}></i>
+                        <i className={`fas fa-${mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'volume-up' : mode === 'processing' ? 'bolt' : 'power-off'} text-4xl text-white`}></i>
                     </div>
 
                     <div className="w-full mt-12 p-6 bg-slate-900 bg-opacity-80 rounded-xl border border-slate-700 min-h-[200px] flex flex-col justify-end shadow-2xl">
@@ -288,7 +342,7 @@ async def serve_ui():
                         )}
                         {!transcript && !response && (
                             <div className="text-center text-gray-600 text-sm italic">
-                                "Tap the orb to speak with Llama 3..."
+                                "Tap the orb to start a continuous conversation."
                             </div>
                         )}
                     </div>
