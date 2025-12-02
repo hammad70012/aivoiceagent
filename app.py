@@ -5,7 +5,7 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from openai import AsyncOpenAI  # Standard library used for OpenRouter
+from openai import AsyncOpenAI
 import redis.asyncio as redis
 import asyncpg
 from dotenv import load_dotenv
@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-AI_MODEL = os.getenv("AI_MODEL", "x-ai/grok-2-1212") # Default fallback
+# Defaulting to a model that supports reasoning/chain of thought
+AI_MODEL = os.getenv("AI_MODEL", "x-ai/grok-2-1212") 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 
@@ -22,7 +23,7 @@ if not OPENROUTER_API_KEY:
     raise ValueError("❌ .env file missing or OPENROUTER_API_KEY not found!")
 
 # 2. APP SETUP
-app = FastAPI(title="Grok Voice Agent", version="2.0.0")
+app = FastAPI(title="Grok Voice Agent", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -33,7 +34,7 @@ client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
     default_headers={
-        "HTTP-Referer": "http://localhost:8000", # Required by OpenRouter for stats
+        "HTTP-Referer": "http://localhost:8000",
         "X-Title": "Voice Agent App",
     }
 )
@@ -61,7 +62,6 @@ class Infrastructure:
             print(f"❌ Redis Error: {e}")
 
     async def init_db(self):
-        # Auto-create table for analytics
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS conversation_logs (
@@ -88,7 +88,7 @@ async def startup():
 async def shutdown():
     await infra.disconnect()
 
-# 4. INTELLIGENT LAYER (Grok via OpenRouter)
+# 4. INTELLIGENT LAYER (Grok via OpenRouter with Reasoning)
 async def process_conversation(session_id: str, user_text: str):
     # A. Retrieve Context from Redis (Memory)
     history_key = f"grok_chat:{session_id}"
@@ -101,26 +101,48 @@ async def process_conversation(session_id: str, user_text: str):
     # B. Add User Input
     messages.append({"role": "user", "content": user_text})
     
-    # C. Call OpenRouter (Grok)
+    # C. Call OpenRouter (Grok) with Reasoning Enabled
     try:
         completion = await client.chat.completions.create(
             model=AI_MODEL,
             messages=messages,
             temperature=0.7,
-            max_tokens=150
+            max_tokens=250, # Increased slightly to allow for reasoning overhead if needed
+            extra_body={"reasoning": {"enabled": True}} # <--- NEW REASONING FLAG
         )
-        ai_response = completion.choices[0].message.content
+        
+        # Extract the message object
+        response_message = completion.choices[0].message
+        ai_response_content = response_message.content
+        
+        # Check for reasoning details (to pass back next time)
+        # Note: Depending on the SDK version and OpenRouter response, this might be accessed directly or via extra fields
+        reasoning_details = getattr(response_message, "reasoning_details", None)
+
     except Exception as e:
+        print(f"API Error: {e}")
         return f"I encountered an error connecting to Grok: {str(e)}"
 
     # D. Update Memory (Redis) - Expires in 1 hour
-    messages.append({"role": "assistant", "content": ai_response})
-    await infra.redis.set(history_key, json.dumps(messages), ex=3600)
+    # We construct the assistant message manually to include reasoning_details if present
+    assistant_msg = {
+        "role": "assistant", 
+        "content": ai_response_content
+    }
+    
+    # Store reasoning details so the model preserves its thought process in the next turn
+    if reasoning_details:
+        assistant_msg["reasoning_details"] = reasoning_details
+
+    messages.append(assistant_msg)
+    
+    # Save to Redis (using default=str to handle any non-serializable objects)
+    await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
     
     # E. Save Log to Postgres (Async)
-    asyncio.create_task(save_log(session_id, user_text, ai_response))
+    asyncio.create_task(save_log(session_id, user_text, ai_response_content))
     
-    return ai_response
+    return ai_response_content
 
 async def save_log(session_id, user, ai):
     if infra.pool:
@@ -159,7 +181,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Grok Voice AI</title>
+    <title>Grok Voice AI (Reasoning Enabled)</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -199,17 +221,15 @@ async def serve_ui():
     <script type="text/babel">
         function App() {
             const [status, setStatus] = React.useState("Offline");
-            const [mode, setMode] = React.useState("idle"); // idle, listening, speaking
+            const [mode, setMode] = React.useState("idle");
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
             const ws = React.useRef(null);
             
-            // Native Speech Setup
             const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
             const recognition = React.useRef(new SpeechRecognition());
 
             React.useEffect(() => {
-                // Initialize WS
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
                 ws.current = new WebSocket(protocol + window.location.host + "/ws");
                 
@@ -221,7 +241,6 @@ async def serve_ui():
                     speak(e.data);
                 };
 
-                // Initialize Recognition
                 recognition.current.continuous = false;
                 recognition.current.lang = 'en-US';
                 recognition.current.onstart = () => setMode("listening");
@@ -239,8 +258,7 @@ async def serve_ui():
                 setMode("speaking");
                 const utterance = new SpeechSynthesisUtterance(text);
                 const voices = window.speechSynthesis.getVoices();
-                // Prefer a modern sounding voice
-                utterance.voice = voices.find(v => v.name.includes("Microsoft Zira")) || voices[0]; 
+                utterance.voice = voices.find(v => v.name.includes("Google US English")) || voices[0]; 
                 utterance.rate = 1.0;
                 utterance.onend = () => setMode("idle");
                 window.speechSynthesis.speak(utterance);
@@ -263,12 +281,10 @@ async def serve_ui():
                         <p className="text-gray-500 text-sm mt-2 uppercase tracking-widest">{status}</p>
                     </div>
 
-                    {/* THE ORB */}
                     <div className={`orb-container ${mode}`} onClick={toggleMic}>
                         <i className={`fas fa-${mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'wave-square' : 'power-off'} text-4xl text-white`}></i>
                     </div>
 
-                    {/* Chat Display */}
                     <div className="w-full mt-12 p-6 bg-gray-900 bg-opacity-50 rounded-xl border border-gray-800 min-h-[200px] flex flex-col justify-end">
                         {transcript && (
                             <div className="self-end bg-gray-800 text-gray-200 px-4 py-2 rounded-lg mb-3 max-w-[80%] text-sm">
