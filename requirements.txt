@@ -6,3 +6,4 @@ asyncpg
 groq
 python-dotenv
 jinja2
+openai
