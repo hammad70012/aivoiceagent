@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 import sys
-import httpx # PIP INSTALL HTTPX
+import httpx
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -15,14 +15,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # KEYS & URLS
-# We use 127.0.0.1 to avoid localhost resolution issues
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 
 # 2. APP SETUP
-app = FastAPI(title="Ollama Sales Agent", version="3.1.0")
+app = FastAPI(title="Founder Sales Agent", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -38,17 +37,15 @@ class Infrastructure:
         try:
             if DATABASE_URL:
                 self.pool = await asyncpg.create_pool(DATABASE_URL)
-                print(f"✅ PostgreSQL Connected")
-        except Exception as e:
-            print(f"⚠️ DB Warning: {e}")
+                print(f"✅ DB Connected")
+        except: pass
 
         try:
             if REDIS_URL:
                 self.redis = redis.from_url(REDIS_URL, decode_responses=True)
                 await self.redis.ping()
                 print(f"✅ Redis Connected")
-        except Exception as e:
-            print(f"⚠️ Redis Warning: {e}")
+        except: pass
 
     async def disconnect(self):
         if self.pool: await self.pool.close()
@@ -64,17 +61,22 @@ async def startup():
 async def shutdown():
     await infra.disconnect()
 
-# 4. INTELLIGENT LAYER (ROBUST HTTP CLIENT)
+# 4. INTELLIGENT LAYER (FOUNDER PERSONA)
 async def process_conversation(session_id: str, user_text: str):
-    history_key = f"ollama_sales_chat:{session_id}"
+    history_key = f"founder_chat:{session_id}"
     messages = []
     
-    # System Prompt
+    # --- THE FOUNDER CLOSER PROMPT ---
+    # This makes the AI sharp, concise, and focused on booking the call.
     system_prompt = (
-        "You are Alex, a professional Sales Closer. "
-        "Your goal is to book a meeting. "
-        "Reply in 1 short sentence. "
-        "Always ask a question."
+        "You are the Founder of a high-end tech company. You are busy, professional, and direct."
+        "Your Goal: Qualify the user and book a 15-minute demo."
+        "Rules:"
+        "1. Speak naturally and confidently. No robot talk."
+        "2. Keep answers SHORT (1 sentence only). This is a voice call."
+        "3. Always end with a question to control the conversation."
+        "4. If asked 'how are you', say 'Focused. How can I help your business?'"
+        "5. Do not write lists. Do not use markdown."
     )
 
     # 1. Load History
@@ -91,14 +93,14 @@ async def process_conversation(session_id: str, user_text: str):
     
     messages.append({"role": "user", "content": user_text})
     
-    ai_response_content = "I am processing your request..."
+    ai_response_content = "I'm listening, go on."
 
-    # 2. Call Ollama directly
-    print(f"🔹 Sending to Ollama: {user_text}")
+    # 2. SEND TO OLLAMA
+    print(f"🎤 User: {user_text}")
     
     try:
         async with httpx.AsyncClient() as client:
-            # We use a 30 second timeout because CPU inference can be slow
+            # 45 Second Timeout for slower VPS
             response = await client.post(
                 f"{OLLAMA_URL}/api/chat",
                 json={
@@ -106,37 +108,29 @@ async def process_conversation(session_id: str, user_text: str):
                     "messages": messages,
                     "stream": False, 
                     "options": {
-                        "temperature": 0.7,
-                        "num_predict": 100
+                        "temperature": 0.6, # Lower temp = more focused
+                        "num_predict": 60   # Keep it short
                     }
                 },
-                timeout=30.0 
+                timeout=45.0 
             )
             
             if response.status_code == 200:
                 data = response.json()
-                # support both 'message' and 'response' keys depending on version
-                if 'message' in data:
+                # Extract text safely
+                if 'message' in data and 'content' in data['message']:
                     ai_response_content = data['message']['content']
-                elif 'response' in data:
-                    ai_response_content = data['response']
                 else:
-                    ai_response_content = str(data)
+                    ai_response_content = "Could you repeat that? I missed it."
                 
-                print(f"✅ Ollama Output: {ai_response_content}")
+                print(f"🤖 AI: {ai_response_content}")
             else:
-                print(f"❌ Ollama Error Status: {response.status_code}")
-                ai_response_content = "I am having trouble connecting to my brain."
+                print(f"❌ Error {response.status_code}")
+                ai_response_content = "I'm having a bad connection. Can you say that again?"
 
-    except httpx.ConnectError:
-        print("❌ Connection Refused. Is 'ollama serve' running?")
-        ai_response_content = "Please start the Ollama server."
-    except httpx.TimeoutException:
-        print("❌ Timeout. Model is too slow.")
-        ai_response_content = "I am thinking too slowly. Please try again."
     except Exception as e:
-        print(f"❌ Error: {e}")
-        ai_response_content = "System error occurred."
+        print(f"❌ Exception: {e}")
+        ai_response_content = "I can't hear you clearly. Are you still there?"
 
     # 3. Update History
     messages.append({"role": "assistant", "content": ai_response_content})
@@ -160,14 +154,13 @@ async def websocket_endpoint(websocket: WebSocket):
             # Get Response
             response = await process_conversation(session_id, data)
             
-            # FORCE SEND - Ensure data is sent back
-            print(f"📤 Sending to UI: {response}")
+            # Send back to UI
             await websocket.send_text(response)
             
     except WebSocketDisconnect:
         print(f"📴 Disconnected: {session_id}")
 
-# 6. FRONTEND
+# 6. FRONTEND (VISUAL FEEDBACK INCLUDED)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -175,7 +168,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>AI Sales Closer</title>
+    <title>Founder Sales AI</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -197,28 +190,19 @@ async def serve_ui():
             z-index: 10;
         }
         .orb-container:hover { transform: scale(1.05); border-color: #38bdf8; }
-        
         .orb-container.listening {
-            border-color: #ef4444;
-            background: radial-gradient(circle, #450a0a 0%, #020617 100%);
-            box-shadow: 0 0 50px rgba(239, 68, 68, 0.4);
-            animation: pulse-red 1.5s infinite;
+            border-color: #ef4444; background: radial-gradient(circle, #450a0a 0%, #020617 100%);
+            box-shadow: 0 0 50px rgba(239, 68, 68, 0.4); animation: pulse-red 1.5s infinite;
         }
-        
         .orb-container.speaking {
-            border-color: #22c55e;
-            background: radial-gradient(circle, #052e16 0%, #020617 100%);
-            box-shadow: 0 0 50px rgba(34, 197, 94, 0.4);
-            animation: pulse-green 1.5s infinite;
+            border-color: #22c55e; background: radial-gradient(circle, #052e16 0%, #020617 100%);
+            box-shadow: 0 0 50px rgba(34, 197, 94, 0.4); animation: pulse-green 1.5s infinite;
         }
-
         .orb-container.processing {
-            border-color: #f59e0b;
-            animation: spin 1s linear infinite;
+            border-color: #f59e0b; animation: spin 1s linear infinite;
         }
-
-        @keyframes pulse-red { 0% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);} 100% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);} }
-        @keyframes pulse-green { 0% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(34, 197, 94, 0);} 100% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);} }
+        @keyframes pulse-red { 0% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);} }
+        @keyframes pulse-green { 0% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(34, 197, 94, 0);} }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
@@ -231,7 +215,6 @@ async def serve_ui():
             const [mode, setMode] = React.useState("idle");
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
-            
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
             const isConversationActive = React.useRef(false);
@@ -239,23 +222,14 @@ async def serve_ui():
             React.useEffect(() => {
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
                 ws.current = new WebSocket(protocol + window.location.host + "/ws");
-                
                 ws.current.onopen = () => setStatus("Connected");
                 ws.current.onclose = () => setStatus("Disconnected");
-                
                 ws.current.onmessage = (e) => {
                     const text = e.data;
-                    console.log("Received from AI:", text); // Debug log
-                    setResponse(text);
-                    if (text && text.length > 0) {
-                        speakResponse(text);
-                    } else {
-                        // If empty response, go back to listening immediately
-                        if (isConversationActive.current) setMode("listening");
-                    }
+                    setResponse(text); // SHOW TEXT
+                    speakResponse(text); // SPEAK AUDIO
                 };
 
-                // Init Speech Recognition
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
@@ -276,7 +250,6 @@ async def serve_ui():
                             setTranscript(text);
                             setMode("processing");
                             recognition.current.stop();
-                            console.log("Sending:", text);
                             ws.current.send(text);
                         }
                     };
@@ -286,50 +259,29 @@ async def serve_ui():
 
             const speakResponse = (text) => {
                 setMode("speaking");
-                
-                // Clear any previous speech
                 window.speechSynthesis.cancel();
-
                 const utterance = new SpeechSynthesisUtterance(text);
                 
-                // Voice Selection Logic
                 let voices = window.speechSynthesis.getVoices();
-                const setVoice = () => {
-                    const selected = voices.find(v => v.name === "Google US English") || 
-                                     voices.find(v => v.name.includes("Zira")) || 
-                                     voices.find(v => v.lang.startsWith("en-US")) || 
-                                     voices[0];
-                    if (selected) utterance.voice = selected;
-                }
-
+                const selectVoice = () => {
+                    utterance.voice = voices.find(v => v.name === "Google US English") || 
+                                      voices.find(v => v.name.includes("Zira")) || voices[0];
+                };
                 if (!voices.length) { 
                     window.speechSynthesis.onvoiceschanged = () => { 
                         voices = window.speechSynthesis.getVoices(); 
-                        setVoice(); 
+                        selectVoice(); 
                         window.speechSynthesis.speak(utterance); 
                     }; 
                 } else { 
-                    setVoice(); 
+                    selectVoice(); 
                     window.speechSynthesis.speak(utterance); 
                 }
 
                 utterance.rate = 1.0; 
-                utterance.pitch = 1.0;
-
                 utterance.onend = () => {
-                    console.log("Speech ended");
-                    if (isConversationActive.current) { 
-                        setMode("listening"); 
-                        try { recognition.current.start(); } catch(e) {} 
-                    } else { 
-                        setMode("idle"); 
-                    }
-                };
-                
-                // Backup: If speech fails to start, reset mode after 3s
-                utterance.onerror = () => {
-                     console.error("Speech Error");
-                     if (isConversationActive.current) setMode("listening");
+                    if (isConversationActive.current) { setMode("listening"); try { recognition.current.start(); } catch(e) {} } 
+                    else { setMode("idle"); }
                 };
             };
 
@@ -349,7 +301,7 @@ async def serve_ui():
             return (
                 <div className="flex flex-col items-center">
                     <div className="mb-12 text-center">
-                        <h1 className="text-4xl font-bold glow-text tracking-widest text-sky-400">SALES AGENT</h1>
+                        <h1 className="text-4xl font-bold glow-text tracking-widest text-sky-400">FOUNDER AI</h1>
                         <p className="text-gray-500 text-sm mt-3 uppercase tracking-widest font-semibold">{status}</p>
                     </div>
                     <div className={`orb-container ${mode}`} onClick={toggleConversation}>
@@ -360,7 +312,7 @@ async def serve_ui():
                     </div>
                     <div className="mt-8 text-center h-8">
                         {mode === 'listening' && <span className="text-red-400 animate-pulse font-mono">LISTENING...</span>}
-                        {mode === 'speaking' && <span className="text-green-400 animate-pulse font-mono">AGENT SPEAKING...</span>}
+                        {mode === 'speaking' && <span className="text-green-400 animate-pulse font-mono">FOUNDER SPEAKING...</span>}
                         {mode === 'processing' && <span className="text-amber-400 animate-pulse font-mono">PROCESSING...</span>}
                         {mode === 'idle' && <span className="text-gray-600 font-mono">TAP TO START CALL</span>}
                     </div>
