@@ -7,3 +7,5 @@ groq
 python-dotenv
 jinja2
 openai
+ollama
+
