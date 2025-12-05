@@ -6,7 +6,7 @@ import time
 
 # --- SAFETY CHECK: Dependencies ---
 try:
-    from ollama import AsyncClient
+    from ollama import AsyncClient, Client
     import uvicorn
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.responses import HTMLResponse
@@ -17,6 +17,7 @@ try:
 except ImportError as e:
     print("\n❌ CRITICAL ERROR: Missing libraries!")
     print(f"👉 Error details: {e}")
+    print("👉 Please run: pip install --upgrade fastapi uvicorn[standard] ollama redis asyncpg python-dotenv\n")
     sys.exit(1)
 
 # 1. LOAD CONFIGURATION
@@ -38,7 +39,7 @@ app.add_middleware(
 # 3. CLIENT SETUP
 client = AsyncClient(host=OLLAMA_HOST)
 
-# 4. INFRASTRUCTURE
+# 4. INFRASTRUCTURE (DB & REDIS)
 class Infrastructure:
     def __init__(self):
         self.pool = None
@@ -50,8 +51,8 @@ class Infrastructure:
             if DATABASE_URL:
                 self.pool = await asyncpg.create_pool(DATABASE_URL)
                 print(f"✅ PostgreSQL Connected")
-        except Exception:
-            pass # Ignore DB errors for now to keep app running
+        except Exception as e:
+            print(f"⚠️ DB Connection Warning: {e}")
 
         # Redis
         try:
@@ -59,7 +60,8 @@ class Infrastructure:
                 self.redis = redis.from_url(REDIS_URL, decode_responses=True)
                 await self.redis.ping()
                 print(f"✅ Redis Connected")
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Redis Warning (Chat history will not save): {e}")
             self.redis = None
 
     async def disconnect(self):
@@ -68,68 +70,79 @@ class Infrastructure:
 
 infra = Infrastructure()
 
-# --- STARTUP CHECK (Fixes the hanging issue) ---
 @app.on_event("startup")
 async def startup():
-    await infra.connect()
-    print(f"⏳ Checking Ollama connection at {OLLAMA_HOST}...")
+    print(f"🚀 Starting Sales Agent using model: {AI_MODEL}")
+    print(f"📡 Connecting to Ollama at: {OLLAMA_HOST}")
+    # Quick Check if Ollama is running
     try:
-        # We try to generate 1 word to ensure model is loaded into memory
-        await asyncio.wait_for(client.generate(model=AI_MODEL, prompt="Hi"), timeout=10.0)
-        print(f"✅ Ollama is READY and model '{AI_MODEL}' is loaded!")
-    except asyncio.TimeoutError:
-        print(f"⚠️ WARNING: Ollama is slow or model is downloading. The first response might take time.")
+        sync_client = Client(host=OLLAMA_HOST)
+        sync_client.list()
+        print("✅ Ollama is ONLINE and reachable.")
     except Exception as e:
-        print(f"❌ CRITICAL OLLAMA ERROR: {e}")
-        print("👉 Make sure Ollama is running: 'ollama serve'")
-        print(f"👉 Make sure model is pulled: 'ollama pull {AI_MODEL}'")
+        print(f"❌ ERROR: Cannot connect to Ollama. Is it running? {e}")
+    
+    await infra.connect()
 
 @app.on_event("shutdown")
 async def shutdown():
     await infra.disconnect()
 
-# 5. INTELLIGENT LAYER
+# 5. INTELLIGENT LAYER (SALES PERSONA)
 async def process_conversation(session_id: str, user_text: str):
     history_key = f"ollama_sales_chat:{session_id}"
     messages = []
     
-    # SYSTEM PROMPT
+    # --- SALES SYSTEM PROMPT ---
     system_prompt = (
         "You are Alex, an elite Sales Closer. "
-        "Your ONLY goal is to qualify this lead and book a meeting or close the deal. "
-        "BEHAVIOR:"
-        "1. Be direct, confident, and high-energy. Do not be passive."
-        "2. Keep responses SHORT (maximum 1 sentence). Use spoken English style."
-        "3. Always end with a question to drive the sale forward."
-        "4. If they have objections, overcome them quickly and pivot back to the close."
+        "Your goal is to qualify the user and book a meeting. "
+        "RULES:"
+        "1. Keep answers SHORT (max 15 words). Spoken style."
+        "2. End every response with a relevant question."
+        "3. Be high energy and confident."
+        "4. Do not use bullet points or lists."
     )
 
-    # 1. Get History
+    # 1. Try to get history
     try:
         if infra.redis:
             raw_history = await infra.redis.get(history_key)
-            if raw_history: messages = json.loads(raw_history)
-    except Exception: pass
+            if raw_history:
+                messages = json.loads(raw_history)
+    except Exception:
+        pass
 
-    if not messages: messages = [{"role": "system", "content": system_prompt}]
+    if not messages:
+        messages = [{"role": "system", "content": system_prompt}]
+    
     messages.append({"role": "user", "content": user_text})
     
-    print(f"🤔 Sending to AI: '{user_text}'...")
-    ai_response_content = "I'm having trouble connecting to my brain right now."
+    ai_response_content = ""
 
-    # 2. Call Ollama (WITH TIMEOUT)
     try:
-        # Add a 10-second timeout so it doesn't hang forever
+        print(f"⏳ Sending to Ollama... (User: {user_text})")
+        start_time = time.time()
+        
+        # 3. Call Ollama with TIMEOUT
+        # We enforce a timeout so the UI doesn't spin forever
         response = await asyncio.wait_for(
             client.chat(
                 model=AI_MODEL,
                 messages=messages,
-                options={'temperature': 0.6, 'num_predict': 60}
+                options={
+                    'temperature': 0.7, 
+                    'num_predict': 50, # Keep it very short for speed
+                    'num_ctx': 1024
+                }
             ),
-            timeout=10.0 
+            timeout=15.0 # 15 Seconds Maximum Wait
         )
 
-        # Extract Text safely
+        duration = time.time() - start_time
+        print(f"✅ Ollama replied in {duration:.2f}s")
+
+        # 4. Extract Response
         if hasattr(response, 'message'):
             ai_response_content = response.message.content
         elif 'message' in response:
@@ -137,20 +150,20 @@ async def process_conversation(session_id: str, user_text: str):
         else:
             ai_response_content = str(response)
 
-        print(f"✅ AI Replied: {ai_response_content}")
-
     except asyncio.TimeoutError:
-        print("❌ Error: Ollama Timed Out")
-        ai_response_content = "I'm sorry, I'm thinking a bit too slowly. Could you ask that again?"
+        print("❌ Ollama TIMEOUT - Taking too long.")
+        return "I'm having a little trouble hearing you, could you repeat that?"
     except Exception as e:
-        print(f"❌ Error: {e}")
-        ai_response_content = "I'm having a technical glitch. Can we continue in a moment?"
+        print(f"❌ Ollama API Error: {e}")
+        return "System offline. Please check connection."
 
-    # 3. Update History
+    # 5. Save History
     messages.append({"role": "assistant", "content": ai_response_content})
+    
     if infra.redis:
-        try: await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
-        except: pass
+        try:
+            await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
+        except Exception: pass
     
     return ai_response_content
 
@@ -166,16 +179,16 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             if not data.strip(): continue
             
-            # This ensures we ALWAYS send a response, even if backend fails
-            try:
-                response = await process_conversation(session_id, data)
-                await websocket.send_text(response)
-            except Exception as e:
-                print(f"🔥 Critical processing error: {e}")
-                await websocket.send_text("I didn't catch that, sorry.")
+            # Process with Sales Logic
+            response = await process_conversation(session_id, data)
+            
+            # Send back to UI
+            await websocket.send_text(response)
             
     except WebSocketDisconnect:
         print(f"📴 Disconnected: {session_id}")
+    except Exception as e:
+        print(f"🔥 WS Error: {e}")
 
 # 7. FRONTEND
 @app.get("/", response_class=HTMLResponse)
@@ -207,9 +220,26 @@ async def serve_ui():
             z-index: 10;
         }
         .orb-container:hover { transform: scale(1.05); border-color: #38bdf8; }
-        .orb-container.listening { border-color: #ef4444; background: radial-gradient(circle, #450a0a 0%, #020617 100%); box-shadow: 0 0 50px rgba(239, 68, 68, 0.4); animation: pulse-red 1.5s infinite; }
-        .orb-container.speaking { border-color: #22c55e; background: radial-gradient(circle, #052e16 0%, #020617 100%); box-shadow: 0 0 50px rgba(34, 197, 94, 0.4); animation: pulse-green 1.5s infinite; }
-        .orb-container.processing { border-color: #f59e0b; animation: spin 1s linear infinite; }
+        
+        .orb-container.listening {
+            border-color: #ef4444;
+            background: radial-gradient(circle, #450a0a 0%, #020617 100%);
+            box-shadow: 0 0 50px rgba(239, 68, 68, 0.4);
+            animation: pulse-red 1.5s infinite;
+        }
+        
+        .orb-container.speaking {
+            border-color: #22c55e;
+            background: radial-gradient(circle, #052e16 0%, #020617 100%);
+            box-shadow: 0 0 50px rgba(34, 197, 94, 0.4);
+            animation: pulse-green 1.5s infinite;
+        }
+
+        .orb-container.processing {
+            border-color: #f59e0b;
+            animation: spin 1s linear infinite;
+        }
+
         @keyframes pulse-red { 0% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);} 100% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);} }
         @keyframes pulse-green { 0% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(34, 197, 94, 0);} 100% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0);} }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
@@ -217,6 +247,7 @@ async def serve_ui():
 </head>
 <body class="h-screen flex items-center justify-center overflow-hidden">
     <div id="root" class="w-full max-w-lg"></div>
+
     <script type="text/babel">
         function App() {
             const [status, setStatus] = React.useState("Disconnected");
@@ -233,8 +264,9 @@ async def serve_ui():
                 ws.current.onopen = () => setStatus("Connected");
                 ws.current.onclose = () => setStatus("Disconnected");
                 ws.current.onmessage = (e) => {
-                    setResponse(e.data);
-                    speakResponse(e.data);
+                    const text = e.data;
+                    setResponse(text);
+                    speakResponse(text);
                 };
 
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
@@ -243,6 +275,7 @@ async def serve_ui():
                     recognition.current.continuous = true; 
                     recognition.current.interimResults = false;
                     recognition.current.lang = 'en-US';
+
                     recognition.current.onstart = () => { if (isConversationActive.current) setMode("listening"); };
                     recognition.current.onend = () => {
                         if (isConversationActive.current && mode !== "speaking" && mode !== "processing") {
@@ -280,6 +313,7 @@ async def serve_ui():
                     else { setMode("idle"); }
                 };
             };
+
             const toggleConversation = () => {
                 if (isConversationActive.current) {
                     isConversationActive.current = false;
@@ -292,6 +326,7 @@ async def serve_ui():
                     try { recognition.current.start(); } catch(e) {}
                 }
             };
+
             return (
                 <div className="flex flex-col items-center">
                     <div className="mb-12 text-center">
@@ -299,7 +334,10 @@ async def serve_ui():
                         <p className="text-gray-500 text-sm mt-3 uppercase tracking-widest font-semibold">{status}</p>
                     </div>
                     <div className={`orb-container ${mode}`} onClick={toggleConversation}>
-                        <i className={`fas fa-${mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'comments' : mode === 'processing' ? 'sync' : 'power-off'} text-5xl text-white`}></i>
+                        <i className={`fas fa-${
+                            mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'comments' : 
+                            mode === 'processing' ? 'sync' : 'power-off'
+                        } text-5xl text-white`}></i>
                     </div>
                     <div className="mt-8 text-center h-8">
                         {mode === 'listening' && <span className="text-red-400 animate-pulse font-mono">LISTENING...</span>}
