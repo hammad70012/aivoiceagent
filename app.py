@@ -6,7 +6,7 @@ import time
 
 # --- SAFETY CHECK: Dependencies ---
 try:
-    from ollama import AsyncClient, Client
+    from ollama import AsyncClient
     import uvicorn
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
     from fastapi.responses import HTMLResponse
@@ -15,16 +15,15 @@ try:
     import asyncpg
     from dotenv import load_dotenv
 except ImportError as e:
-    print("\n❌ CRITICAL ERROR: Missing libraries!")
-    print(f"👉 Error details: {e}")
-    print("👉 Please run: pip install --upgrade fastapi uvicorn[standard] ollama redis asyncpg python-dotenv\n")
+    print(f"❌ CRITICAL ERROR: Missing libraries! {e}")
     sys.exit(1)
 
 # 1. LOAD CONFIGURATION
 load_dotenv()
 
 # KEYS & URLS
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+# CHANGED: Use 127.0.0.1 instead of localhost for better reliability
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
@@ -52,7 +51,7 @@ class Infrastructure:
                 self.pool = await asyncpg.create_pool(DATABASE_URL)
                 print(f"✅ PostgreSQL Connected")
         except Exception as e:
-            print(f"⚠️ DB Connection Warning: {e}")
+            print(f"⚠️ DB Warning: {e}")
 
         # Redis
         try:
@@ -61,8 +60,7 @@ class Infrastructure:
                 await self.redis.ping()
                 print(f"✅ Redis Connected")
         except Exception as e:
-            print(f"⚠️ Redis Warning (Chat history will not save): {e}")
-            self.redis = None
+            print(f"⚠️ Redis Warning: {e}")
 
     async def disconnect(self):
         if self.pool: await self.pool.close()
@@ -72,16 +70,6 @@ infra = Infrastructure()
 
 @app.on_event("startup")
 async def startup():
-    print(f"🚀 Starting Sales Agent using model: {AI_MODEL}")
-    print(f"📡 Connecting to Ollama at: {OLLAMA_HOST}")
-    # Quick Check if Ollama is running
-    try:
-        sync_client = Client(host=OLLAMA_HOST)
-        sync_client.list()
-        print("✅ Ollama is ONLINE and reachable.")
-    except Exception as e:
-        print(f"❌ ERROR: Cannot connect to Ollama. Is it running? {e}")
-    
     await infra.connect()
 
 @app.on_event("shutdown")
@@ -96,15 +84,13 @@ async def process_conversation(session_id: str, user_text: str):
     # --- SALES SYSTEM PROMPT ---
     system_prompt = (
         "You are Alex, an elite Sales Closer. "
-        "Your goal is to qualify the user and book a meeting. "
-        "RULES:"
-        "1. Keep answers SHORT (max 15 words). Spoken style."
-        "2. End every response with a relevant question."
-        "3. Be high energy and confident."
-        "4. Do not use bullet points or lists."
+        "Your ONLY goal is to qualify this lead and book a meeting. "
+        "1. Keep responses SHORT (1 sentence only). "
+        "2. Always end with a question. "
+        "3. Be high energy and professional."
     )
 
-    # 1. Try to get history
+    # 1. Load History
     try:
         if infra.redis:
             raw_history = await infra.redis.get(history_key)
@@ -121,28 +107,20 @@ async def process_conversation(session_id: str, user_text: str):
     ai_response_content = ""
 
     try:
-        print(f"⏳ Sending to Ollama... (User: {user_text})")
-        start_time = time.time()
+        print(f"🤔 Sending to Ollama ({AI_MODEL})...")
         
-        # 3. Call Ollama with TIMEOUT
-        # We enforce a timeout so the UI doesn't spin forever
+        # --- FIXED: ADDED TIMEOUT ---
+        # If Ollama doesn't reply in 8 seconds, we abort so the UI doesn't freeze.
         response = await asyncio.wait_for(
             client.chat(
                 model=AI_MODEL,
                 messages=messages,
-                options={
-                    'temperature': 0.7, 
-                    'num_predict': 50, # Keep it very short for speed
-                    'num_ctx': 1024
-                }
+                options={'temperature': 0.6, 'num_predict': 60}
             ),
-            timeout=15.0 # 15 Seconds Maximum Wait
+            timeout=8.0 
         )
 
-        duration = time.time() - start_time
-        print(f"✅ Ollama replied in {duration:.2f}s")
-
-        # 4. Extract Response
+        # Handle different response formats
         if hasattr(response, 'message'):
             ai_response_content = response.message.content
         elif 'message' in response:
@@ -150,20 +128,19 @@ async def process_conversation(session_id: str, user_text: str):
         else:
             ai_response_content = str(response)
 
-    except asyncio.TimeoutError:
-        print("❌ Ollama TIMEOUT - Taking too long.")
-        return "I'm having a little trouble hearing you, could you repeat that?"
-    except Exception as e:
-        print(f"❌ Ollama API Error: {e}")
-        return "System offline. Please check connection."
+        print(f"✅ Ollama replied: {ai_response_content}")
 
-    # 5. Save History
+    except asyncio.TimeoutError:
+        print("❌ Ollama Timed Out!")
+        return "I apologize, the connection is a bit slow. Could you say that again?"
+    except Exception as e:
+        print(f"❌ Ollama Error: {e}")
+        return "I am having a technical issue connecting to the AI brain. Is Ollama running?"
+
+    # Update History
     messages.append({"role": "assistant", "content": ai_response_content})
-    
     if infra.redis:
-        try:
-            await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
-        except Exception: pass
+        await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
     
     return ai_response_content
 
@@ -172,23 +149,23 @@ async def process_conversation(session_id: str, user_text: str):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     session_id = str(id(websocket))
-    print(f"🔗 Connected: {session_id}")
+    print(f"🔗 Lead Connected: {session_id}")
     
     try:
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
             
-            # Process with Sales Logic
+            # Send processing to sales logic
             response = await process_conversation(session_id, data)
             
             # Send back to UI
             await websocket.send_text(response)
             
     except WebSocketDisconnect:
-        print(f"📴 Disconnected: {session_id}")
+        print(f"📴 Lead Disconnected: {session_id}")
     except Exception as e:
-        print(f"🔥 WS Error: {e}")
+        print(f"🔥 Critical WebSocket Error: {e}")
 
 # 7. FRONTEND
 @app.get("/", response_class=HTMLResponse)
@@ -254,6 +231,7 @@ async def serve_ui():
             const [mode, setMode] = React.useState("idle");
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
+            
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
             const isConversationActive = React.useRef(false);
@@ -261,8 +239,10 @@ async def serve_ui():
             React.useEffect(() => {
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
                 ws.current = new WebSocket(protocol + window.location.host + "/ws");
+                
                 ws.current.onopen = () => setStatus("Connected");
                 ws.current.onclose = () => setStatus("Disconnected");
+                
                 ws.current.onmessage = (e) => {
                     const text = e.data;
                     setResponse(text);
