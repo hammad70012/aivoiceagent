@@ -19,7 +19,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 
 # 2. APP SETUP
-app = FastAPI(title="Founder Sales AI (Audio Fixed)", version="6.0.0")
+app = FastAPI(title="Founder Sales AI (Visual Logs)", version="7.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
@@ -35,13 +35,11 @@ class Infrastructure:
             if REDIS_URL:
                 self.redis = redis.from_url(REDIS_URL, decode_responses=True)
                 await self.redis.ping()
-                print(f"✅ Redis Connected")
         except: pass
 
         try:
             if DATABASE_URL:
                 self.pool = await asyncpg.create_pool(DATABASE_URL)
-                print(f"✅ DB Connected")
         except: pass
 
     async def disconnect(self):
@@ -52,25 +50,22 @@ infra = Infrastructure()
 
 @app.on_event("startup")
 async def startup():
-    print("🚀 SERVER STARTING...")
     await infra.connect()
 
 @app.on_event("shutdown")
 async def shutdown():
     await infra.disconnect()
 
-# 4. FOUNDER SALES LOGIC
-async def process_conversation(session_id: str, user_text: str):
+# 4. SALES LOGIC WITH LOGGING
+async def process_conversation(session_id: str, user_text: str, websocket: WebSocket):
     history_key = f"founder_chat:{session_id}"
     messages = []
     
-    # --- FOUNDER PERSONA ---
+    # Send Log to UI
+    await websocket.send_text("LOG: 🧠 Reading Memory...")
+
     system_prompt = (
-        "You are the Founder of a high-tech company. You are closing a deal."
-        "1. Be confident, direct, and slightly aggressive."
-        "2. Response MUST be less than 15 words."
-        "3. Always end with a question."
-        "4. Do not use special characters or markdown."
+        "You are the Founder. Be direct. Short answer (max 1 sentence). End with a question."
     )
 
     if infra.redis:
@@ -84,35 +79,40 @@ async def process_conversation(session_id: str, user_text: str):
     
     messages.append({"role": "user", "content": user_text})
     
-    print(f"🎤 User: {user_text}")
+    # Send Log to UI
+    await websocket.send_text(f"LOG: 🚀 Sending to Ollama ({AI_MODEL})...")
 
-    ai_response = "I am listening."
+    ai_response = ""
 
-    # CALL OLLAMA
     try:
         async with httpx.AsyncClient() as client:
+            # 20 Second Timeout
             response = await client.post(
                 f"{OLLAMA_URL}/api/chat",
                 json={
                     "model": AI_MODEL, 
                     "messages": messages, 
                     "stream": False,
-                    "options": {"temperature": 0.7, "num_predict": 40}
+                    "options": {"temperature": 0.6, "num_predict": 50}
                 },
-                timeout=30.0 
+                timeout=20.0 
             )
             
             if response.status_code == 200:
                 data = response.json()
                 if 'message' in data:
                     ai_response = data['message']['content']
-                print(f"🔊 AI: {ai_response}")
+                await websocket.send_text("LOG: ✅ Ollama Replied Success")
             else:
-                ai_response = "I'm having trouble connecting."
+                await websocket.send_text(f"LOG: ❌ Ollama Error {response.status_code}")
+                ai_response = "I am having connection issues."
 
+    except httpx.TimeoutException:
+        await websocket.send_text("LOG: ❌ Ollama Timeout (Too Slow)")
+        ai_response = "I am thinking too slowly. Please repeat."
     except Exception as e:
-        print(f"❌ Error: {e}")
-        ai_response = "Can you repeat that?"
+        await websocket.send_text(f"LOG: ❌ Error: {str(e)}")
+        ai_response = "System error."
 
     # Update History
     messages.append({"role": "assistant", "content": ai_response})
@@ -129,23 +129,30 @@ async def websocket_endpoint(websocket: WebSocket):
     print(f"🔗 Connected: {session_id}")
     
     try:
+        await websocket.send_text("LOG: 🔗 Connected to Server")
+        
         while True:
             data = await websocket.receive_text()
             
-            # Handle Ping/Keep-Alive
             if data == "__PING__":
                 await websocket.send_text("__PONG__")
                 continue
                 
             if not data.strip(): continue
             
-            response = await process_conversation(session_id, data)
+            # Log reception
+            await websocket.send_text(f"LOG: 🎤 Heard: {data}")
+            
+            # Process
+            response = await process_conversation(session_id, data, websocket)
+            
+            # Send Final Audio Text
             await websocket.send_text(response)
             
     except WebSocketDisconnect:
         print(f"📴 Disconnected: {session_id}")
 
-# 6. FRONTEND (FIXED AUDIO)
+# 6. FRONTEND (LOG BOX INCLUDED)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -153,7 +160,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Founder Sales AI</title>
+    <title>Founder AI (Debug Mode)</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -175,16 +182,33 @@ async def serve_ui():
             z-index: 10;
         }
         .orb-container:hover { transform: scale(1.05); border-color: #38bdf8; }
-        .orb-container.listening { border-color: #ef4444; background: radial-gradient(circle, #450a0a 0%, #020617 100%); box-shadow: 0 0 50px rgba(239, 68, 68, 0.4); animation: pulse-red 1.5s infinite; }
-        .orb-container.speaking { border-color: #22c55e; background: radial-gradient(circle, #052e16 0%, #020617 100%); box-shadow: 0 0 50px rgba(34, 197, 94, 0.4); animation: pulse-green 1.5s infinite; }
+        .orb-container.listening { border-color: #ef4444; background: radial-gradient(circle, #450a0a 0%, #020617 100%); animation: pulse-red 1.5s infinite; }
+        .orb-container.speaking { border-color: #22c55e; background: radial-gradient(circle, #052e16 0%, #020617 100%); animation: pulse-green 1.5s infinite; }
         .orb-container.processing { border-color: #f59e0b; animation: spin 1s linear infinite; }
         @keyframes pulse-red { 0% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);} }
         @keyframes pulse-green { 0% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(34, 197, 94, 0);} }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        /* Log Box Styles */
+        .log-box {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: #00ff00;
+            background: #000;
+            border: 1px solid #333;
+            width: 90%;
+            max-width: 500px;
+            height: 150px;
+            overflow-y: auto;
+            padding: 10px;
+            margin-top: 20px;
+            border-radius: 5px;
+            opacity: 0.8;
+        }
     </style>
 </head>
-<body class="h-screen flex items-center justify-center overflow-hidden">
-    <div id="root" class="w-full max-w-lg"></div>
+<body class="h-screen flex flex-col items-center justify-center overflow-hidden">
+    <div id="root" class="w-full max-w-lg flex flex-col items-center"></div>
 
     <script type="text/babel">
         function App() {
@@ -192,11 +216,21 @@ async def serve_ui():
             const [mode, setMode] = React.useState("idle");
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
-            
+            const [logs, setLogs] = React.useState([]);
+
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
             const isConversationActive = React.useRef(false);
             const pingInterval = React.useRef(null);
+            const logsEndRef = React.useRef(null);
+
+            const addLog = (msg) => {
+                setLogs(prev => [...prev, msg].slice(-10)); // Keep last 10 logs
+            };
+
+            React.useEffect(() => {
+                if(logsEndRef.current) logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+            }, [logs]);
 
             React.useEffect(() => {
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
@@ -204,7 +238,6 @@ async def serve_ui():
                 
                 ws.current.onopen = () => {
                     setStatus("Connected");
-                    // Keep Alive Ping every 10 seconds
                     pingInterval.current = setInterval(() => {
                         if(ws.current.readyState === 1) ws.current.send("__PING__");
                     }, 10000);
@@ -212,19 +245,23 @@ async def serve_ui():
                 
                 ws.current.onclose = () => {
                     setStatus("Disconnected");
-                    if(pingInterval.current) clearInterval(pingInterval.current);
+                    addLog("⚠️ Connection Closed");
                 };
                 
                 ws.current.onmessage = (e) => {
                     const text = e.data;
                     if (text === "__PONG__") return;
+
+                    // Check if it is a log message
+                    if (text.startsWith("LOG:")) {
+                        addLog(text.replace("LOG: ", ""));
+                        return;
+                    }
                     
-                    console.log("AI SAID:", text);
                     setResponse(text);
                     speakResponse(text);
                 };
 
-                // PRE-LOAD VOICES
                 window.speechSynthesis.getVoices();
 
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
@@ -235,13 +272,11 @@ async def serve_ui():
                     recognition.current.lang = 'en-US';
 
                     recognition.current.onstart = () => { if (isConversationActive.current) setMode("listening"); };
-                    
                     recognition.current.onend = () => {
                         if (isConversationActive.current && mode !== "speaking" && mode !== "processing") {
                             try { recognition.current.start(); } catch(e) {}
                         } else if (!isConversationActive.current) { setMode("idle"); }
                     };
-
                     recognition.current.onresult = (event) => {
                         const resultsLength = event.results.length - 1;
                         const text = event.results[resultsLength][0].transcript;
@@ -249,6 +284,7 @@ async def serve_ui():
                             setTranscript(text);
                             setMode("processing");
                             recognition.current.stop();
+                            addLog(`🎤 Sending: ${text}`);
                             ws.current.send(text);
                         }
                     };
@@ -261,20 +297,16 @@ async def serve_ui():
 
             const speakResponse = (text) => {
                 setMode("speaking");
+                addLog("🔊 Speaking: " + text.substring(0, 20) + "...");
+                
                 window.speechSynthesis.cancel();
-                
                 const utterance = new SpeechSynthesisUtterance(text);
-                
-                // IMPORTANT: Prevent Garbage Collection
                 window.currentUtterance = utterance;
 
-                // Voice Logic
                 let voices = window.speechSynthesis.getVoices();
                 const setVoice = () => {
                     utterance.voice = voices.find(v => v.name === "Google US English") || 
-                                      voices.find(v => v.name.includes("Zira")) || 
-                                      voices.find(v => v.lang.startsWith("en-US")) || 
-                                      voices[0];
+                                      voices.find(v => v.name.includes("Zira")) || voices[0];
                 };
 
                 if (!voices.length) {
@@ -289,9 +321,8 @@ async def serve_ui():
                 }
 
                 utterance.rate = 1.0;
-                
                 utterance.onend = () => {
-                    console.log("Speech finished");
+                    addLog("✅ Speech Done");
                     if (isConversationActive.current) {
                         setMode("listening");
                         try { recognition.current.start(); } catch(e) {}
@@ -299,10 +330,8 @@ async def serve_ui():
                         setMode("idle");
                     }
                 };
-
                 utterance.onerror = (e) => {
-                    console.error("Speech Error:", e);
-                    // If audio fails, force go back to listening so we don't get stuck
+                    addLog("❌ Audio Error");
                     if (isConversationActive.current) setMode("listening");
                 };
             };
@@ -313,36 +342,49 @@ async def serve_ui():
                     recognition.current.stop();
                     window.speechSynthesis.cancel();
                     setMode("idle");
+                    addLog("⏹️ Stopped");
                 } else {
                     isConversationActive.current = true;
-                    // Unlock Audio Context on Mobile/Safari
                     window.speechSynthesis.resume();
                     setMode("listening");
                     try { recognition.current.start(); } catch(e) {}
+                    addLog("▶️ Started");
                 }
             };
 
             return (
-                <div className="flex flex-col items-center">
-                    <div className="mb-12 text-center">
+                <div className="flex flex-col items-center w-full">
+                    <div className="mb-8 text-center">
                         <h1 className="text-4xl font-bold glow-text tracking-widest text-sky-400">FOUNDER AI</h1>
                         <p className="text-gray-500 text-sm mt-3 uppercase tracking-widest font-semibold">{status}</p>
                     </div>
+
                     <div className={`orb-container ${mode}`} onClick={toggleConversation}>
                         <i className={`fas fa-${
                             mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'comments' : 
                             mode === 'processing' ? 'sync' : 'power-off'
                         } text-5xl text-white`}></i>
                     </div>
+
                     <div className="mt-8 text-center h-8">
                         {mode === 'listening' && <span className="text-red-400 animate-pulse font-mono">LISTENING...</span>}
                         {mode === 'speaking' && <span className="text-green-400 animate-pulse font-mono">FOUNDER SPEAKING...</span>}
                         {mode === 'processing' && <span className="text-amber-400 animate-pulse font-mono">PROCESSING...</span>}
                         {mode === 'idle' && <span className="text-gray-600 font-mono">TAP TO START CALL</span>}
                     </div>
+
                     <div className="w-full max-w-md mt-8 p-6 bg-slate-900 bg-opacity-90 rounded-xl border border-slate-800 min-h-[150px] flex flex-col justify-end shadow-2xl">
                         {transcript && <div className="self-end bg-slate-800 text-sky-100 px-4 py-2 rounded-2xl rounded-tr-none mb-3 max-w-[85%] text-sm shadow-md">{transcript}</div>}
                         {response && <div className="self-start text-white font-medium text-lg leading-relaxed">{response}</div>}
+                    </div>
+
+                    {/* LOG BOX */}
+                    <div className="log-box">
+                        <div className="text-xs text-gray-400 border-b border-gray-800 mb-2">DIAGNOSTIC LOGS:</div>
+                        {logs.map((log, i) => (
+                            <div key={i}>{log}</div>
+                        ))}
+                        <div ref={logsEndRef} />
                     </div>
                 </div>
             );
