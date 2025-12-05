@@ -4,36 +4,86 @@ import asyncio
 import sys
 import httpx
 import uvicorn
-import traceback # IMPORT TRACEBACK TO CATCH CRASHES
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+import redis.asyncio as redis
+import asyncpg
 from dotenv import load_dotenv
 
 # 1. CONFIGURATION
 load_dotenv()
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
+DATABASE_URL = os.getenv("DATABASE_URL")
+REDIS_URL = os.getenv("REDIS_URL")
 
 # 2. APP SETUP
-app = FastAPI(title="Founder AI (Crash Reporter)", version="8.0.0")
+app = FastAPI(title="Founder Sales AI (Final)", version="9.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# 3. SALES LOGIC (WRAPPED IN SAFETY NET)
-async def process_conversation(session_id: str, user_text: str, websocket: WebSocket):
-    try:
-        messages = []
-        system_prompt = "You are the Founder. Short answer. End with question."
+# 3. INFRASTRUCTURE
+class Infrastructure:
+    def __init__(self):
+        self.pool = None
+        self.redis = None
+
+    async def connect(self):
+        try:
+            if REDIS_URL:
+                self.redis = redis.from_url(REDIS_URL, decode_responses=True)
+        except: pass
+        try:
+            if DATABASE_URL:
+                self.pool = await asyncpg.create_pool(DATABASE_URL)
+        except: pass
+
+    async def disconnect(self):
+        if self.pool: await self.pool.close()
+        if self.redis: await self.redis.close()
+
+infra = Infrastructure()
+
+@app.on_event("startup")
+async def startup():
+    await infra.connect()
+
+@app.on_event("shutdown")
+async def shutdown():
+    await infra.disconnect()
+
+# 4. SALES LOGIC (STRICT CLOSER)
+async def process_conversation(session_id: str, user_text: str):
+    history_key = f"founder_chat:{session_id}"
+    messages = []
+    
+    # --- STRICT CLOSER PROMPT ---
+    system_prompt = (
+        "You are Alex, a high-stakes Sales Closer. You are busy and professional."
+        "RULES:"
+        "1. Your goal is to BOOK A MEETING."
+        "2. Responses must be under 20 words. No long paragraphs."
+        "3. Always end with a question to control the frame."
+        "4. If asked 'how are you', say 'Focused on growth. How can I help you scale?'"
+    )
+
+    if infra.redis:
+        try:
+            raw = await infra.redis.get(history_key)
+            if raw: messages = json.loads(raw)
+        except: pass
+
+    if not messages:
         messages = [{"role": "system", "content": system_prompt}]
-        messages.append({"role": "user", "content": user_text})
-        
-        await websocket.send_text(f"LOG: 🚀 Sending to Ollama ({AI_MODEL})...")
+    
+    messages.append({"role": "user", "content": user_text})
+    
+    ai_response = ""
 
-        ai_response = ""
-
-        # CALL OLLAMA WITH 45s TIMEOUT (VPS IS SLOW)
+    # CALL OLLAMA
+    try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{OLLAMA_URL}/api/chat",
@@ -41,37 +91,36 @@ async def process_conversation(session_id: str, user_text: str, websocket: WebSo
                     "model": AI_MODEL, 
                     "messages": messages, 
                     "stream": False,
-                    "options": {"temperature": 0.6, "num_predict": 50}
+                    "options": {
+                        "temperature": 0.6, 
+                        "num_predict": 40 # Limit generation size
+                    }
                 },
-                timeout=45.0 
+                timeout=40.0 
             )
             
             if response.status_code == 200:
                 data = response.json()
                 if 'message' in data:
                     ai_response = data['message']['content']
-                await websocket.send_text("LOG: ✅ Ollama Success!")
             else:
-                await websocket.send_text(f"LOG: ❌ Ollama Status {response.status_code}")
-                ai_response = "Error connecting to brain."
+                ai_response = "I'm having a connection issue."
 
-        return ai_response
+    except Exception:
+        ai_response = "I couldn't hear that properly."
 
-    except httpx.TimeoutException:
-        await websocket.send_text("LOG: ❌ CRITICAL: Ollama Timed Out (VPS too slow)")
-        return "I am thinking too slowly. Please wait."
-    except Exception as e:
-        # SEND THE CRASH REASON TO THE FRONTEND
-        error_msg = str(e)
-        print(f"CRASH: {error_msg}")
-        await websocket.send_text(f"LOG: 🔥 CRASH: {error_msg}")
-        return "System crashed."
+    # Update History
+    messages.append({"role": "assistant", "content": ai_response})
+    if infra.redis:
+        await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
+    
+    return ai_response
 
-# 4. WEBSOCKET (KEEPS CONNECTION ALIVE)
+# 5. WEBSOCKET
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    await websocket.send_text("LOG: 🔗 Connected (Safe Mode)")
+    session_id = str(id(websocket))
     
     try:
         while True:
@@ -83,26 +132,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 
             if not data.strip(): continue
             
-            await websocket.send_text(f"LOG: 🎤 Processing: {data}")
-            
-            # RUN LOGIC
-            response = await process_conversation("session", data, websocket)
-            
-            # SEND RESPONSE
+            response = await process_conversation(session_id, data)
             await websocket.send_text(response)
             
     except WebSocketDisconnect:
-        print("Client disconnected normally")
-    except Exception as e:
-        # CATCH GLOBAL CRASHES
-        error_trace = traceback.format_exc()
-        print(error_trace)
-        try:
-            await websocket.send_text(f"LOG: ☠️ FATAL ERROR: {str(e)}")
-        except:
-            pass
+        pass
 
-# 5. FRONTEND
+# 6. FRONTEND (BEAUTIFUL UI RESTORED)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -110,96 +146,178 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Founder AI (Crash Reporter)</title>
+    <title>AI Sales Closer</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
-        body { background: #000; color: #fff; font-family: monospace; }
-        .orb { width: 100px; height: 100px; border-radius: 50%; background: #333; margin: 20px auto; display:flex; align-items:center; justify-content:center; cursor:pointer;}
-        .orb.listening { background: red; }
-        .orb.speaking { background: green; }
-        .orb.processing { background: orange; }
-        .log-box { width: 95%; height: 300px; border: 1px solid #444; overflow-y: scroll; padding: 10px; color: #0f0; background: #111; margin: 0 auto; }
+        body { background: #0f172a; color: #fff; font-family: 'Segoe UI', sans-serif; }
+        .glow-text { text-shadow: 0 0 20px rgba(56, 189, 248, 0.5); }
+        .orb-container {
+            width: 160px; height: 160px;
+            border-radius: 50%;
+            background: radial-gradient(circle, #0f2e4a 0%, #020617 100%);
+            border: 2px solid #1e3a8a;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer;
+            transition: all 0.4s ease;
+            box-shadow: 0 0 30px rgba(56, 189, 248, 0.1);
+            position: relative;
+            z-index: 10;
+        }
+        .orb-container:hover { transform: scale(1.05); border-color: #38bdf8; }
+        .orb-container.listening { border-color: #ef4444; background: radial-gradient(circle, #450a0a 0%, #020617 100%); box-shadow: 0 0 50px rgba(239, 68, 68, 0.4); animation: pulse-red 1.5s infinite; }
+        .orb-container.speaking { border-color: #22c55e; background: radial-gradient(circle, #052e16 0%, #020617 100%); box-shadow: 0 0 50px rgba(34, 197, 94, 0.4); animation: pulse-green 1.5s infinite; }
+        .orb-container.processing { border-color: #f59e0b; animation: spin 1s linear infinite; }
+        @keyframes pulse-red { 0% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);} }
+        @keyframes pulse-green { 0% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(34, 197, 94, 0);} }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
-<body>
-    <div id="root"></div>
+<body class="h-screen flex items-center justify-center overflow-hidden">
+    <div id="root" class="w-full max-w-lg"></div>
+
     <script type="text/babel">
         function App() {
-            const [logs, setLogs] = React.useState(["Waiting for connection..."]);
+            const [status, setStatus] = React.useState("Disconnected");
             const [mode, setMode] = React.useState("idle");
+            const [transcript, setTranscript] = React.useState("");
+            const [response, setResponse] = React.useState("");
+            
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
-
-            const addLog = (msg) => setLogs(p => [msg, ...p]);
+            const isConversationActive = React.useRef(false);
+            const pingInterval = React.useRef(null);
 
             React.useEffect(() => {
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
                 ws.current = new WebSocket(protocol + window.location.host + "/ws");
                 
                 ws.current.onopen = () => {
-                    addLog("✅ WebSocket Connected");
-                    setInterval(() => { if(ws.current.readyState===1) ws.current.send("__PING__"); }, 5000);
+                    setStatus("Connected");
+                    pingInterval.current = setInterval(() => {
+                        if(ws.current.readyState === 1) ws.current.send("__PING__");
+                    }, 5000);
                 };
                 
-                ws.current.onclose = () => addLog("⚠️ CONNECTION CLOSED (Server Crashed/Stopped)");
-
+                ws.current.onclose = () => setStatus("Disconnected");
+                
                 ws.current.onmessage = (e) => {
                     const text = e.data;
-                    if(text === "__PONG__") return;
-                    if(text.startsWith("LOG:")) {
-                        addLog(text);
-                    } else {
-                        addLog("🗣️ AI: " + text);
-                        speak(text);
-                    }
+                    if (text === "__PONG__") return;
+                    setResponse(text);
+                    speakResponse(text);
                 };
 
-                // SPEECH RECOGNITION
+                // PRELOAD VOICES
+                window.speechSynthesis.getVoices();
+
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
-                    recognition.current.continuous = false; // STOP AFTER 1 SENTENCE TO PREVENT LOOPS
+                    recognition.current.continuous = true; 
+                    recognition.current.interimResults = false;
                     recognition.current.lang = 'en-US';
 
-                    recognition.current.onstart = () => setMode("listening");
-                    recognition.current.onend = () => { if(mode !== "speaking") setMode("idle"); };
-                    recognition.current.onresult = (e) => {
-                        const txt = e.results[0][0].transcript;
-                        addLog("🎤 You: " + txt);
-                        setMode("processing");
-                        ws.current.send(txt);
+                    recognition.current.onstart = () => { if (isConversationActive.current) setMode("listening"); };
+                    
+                    recognition.current.onend = () => {
+                        if (isConversationActive.current && mode !== "speaking" && mode !== "processing") {
+                            try { recognition.current.start(); } catch(e) {}
+                        } else if (!isConversationActive.current) { setMode("idle"); }
+                    };
+
+                    recognition.current.onresult = (event) => {
+                        const resultsLength = event.results.length - 1;
+                        const text = event.results[resultsLength][0].transcript;
+                        if (text.trim() && isConversationActive.current) {
+                            setTranscript(text);
+                            setMode("processing");
+                            recognition.current.stop();
+                            ws.current.send(text);
+                        }
                     };
                 }
-            }, []);
+                return () => { 
+                    if (ws.current) ws.current.close(); 
+                    if (pingInterval.current) clearInterval(pingInterval.current);
+                };
+            }, [mode]);
 
-            const speak = (txt) => {
+            const speakResponse = (text) => {
                 setMode("speaking");
                 window.speechSynthesis.cancel();
-                const u = new SpeechSynthesisUtterance(txt);
-                u.onend = () => setMode("idle");
-                window.speechSynthesis.speak(u);
+                
+                const utterance = new SpeechSynthesisUtterance(text);
+                window.currentUtterance = utterance; // Keep alive
+
+                let voices = window.speechSynthesis.getVoices();
+                const setVoice = () => {
+                    utterance.voice = voices.find(v => v.name === "Google US English") || 
+                                      voices.find(v => v.name.includes("Zira")) || voices[0];
+                };
+
+                if (!voices.length) {
+                    window.speechSynthesis.onvoiceschanged = () => {
+                        voices = window.speechSynthesis.getVoices();
+                        setVoice();
+                        window.speechSynthesis.speak(utterance);
+                    };
+                } else {
+                    setVoice();
+                    window.speechSynthesis.speak(utterance);
+                }
+
+                utterance.rate = 1.0;
+                
+                utterance.onend = () => {
+                    if (isConversationActive.current) {
+                        setMode("listening");
+                        try { recognition.current.start(); } catch(e) {}
+                    } else {
+                        setMode("idle");
+                    }
+                };
             };
 
-            const toggle = () => {
-                if(mode === 'idle') {
-                    recognition.current.start();
-                } else {
+            const toggleConversation = () => {
+                if (isConversationActive.current) {
+                    isConversationActive.current = false;
                     recognition.current.stop();
+                    window.speechSynthesis.cancel();
+                    setMode("idle");
+                } else {
+                    isConversationActive.current = true;
+                    // WAKE UP AUDIO ENGINE
+                    window.speechSynthesis.resume(); 
+                    setMode("listening");
+                    try { recognition.current.start(); } catch(e) {}
                 }
-            }
+            };
 
             return (
-                <div className="p-4 text-center">
-                    <h1 className="text-2xl mb-4">CRASH REPORTER</h1>
-                    <div className={`orb ${mode}`} onClick={toggle}>
-                        {mode === 'idle' ? 'TAP TO SPEAK' : mode}
+                <div className="flex flex-col items-center">
+                    <div className="mb-12 text-center">
+                        <h1 className="text-4xl font-bold glow-text tracking-widest text-sky-400">FOUNDER AI</h1>
+                        <p className="text-gray-500 text-sm mt-3 uppercase tracking-widest font-semibold">{status}</p>
                     </div>
-                    <div className="log-box">
-                        {logs.map((l, i) => <div key={i}>{l}</div>)}
+                    <div className={`orb-container ${mode}`} onClick={toggleConversation}>
+                        <i className={`fas fa-${
+                            mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'comments' : 
+                            mode === 'processing' ? 'sync' : 'power-off'
+                        } text-5xl text-white`}></i>
+                    </div>
+                    <div className="mt-8 text-center h-8">
+                        {mode === 'listening' && <span className="text-red-400 animate-pulse font-mono">LISTENING...</span>}
+                        {mode === 'speaking' && <span className="text-green-400 animate-pulse font-mono">FOUNDER SPEAKING...</span>}
+                        {mode === 'processing' && <span className="text-amber-400 animate-pulse font-mono">PROCESSING...</span>}
+                        {mode === 'idle' && <span className="text-gray-600 font-mono">TAP TO START CALL</span>}
+                    </div>
+                    <div className="w-full max-w-md mt-8 p-6 bg-slate-900 bg-opacity-90 rounded-xl border border-slate-800 min-h-[150px] flex flex-col justify-end shadow-2xl">
+                        {transcript && <div className="self-end bg-slate-800 text-sky-100 px-4 py-2 rounded-2xl rounded-tr-none mb-3 max-w-[85%] text-sm shadow-md">{transcript}</div>}
+                        {response && <div className="self-start text-white font-medium text-lg leading-relaxed">{response}</div>}
                     </div>
                 </div>
             );
