@@ -15,51 +15,46 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Founder AI (Human Marketer)", version="18.0.0")
+app = FastAPI(title="Founder AI (Barge-In)", version="19.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- 3. HUMAN MARKETER KNOWLEDGE BASE ---
-# These prompts are engineered to sound like a REAL PERSON, not a bot.
+# --- 3. ENGAGING MARKETER PROMPTS ---
 BUSINESS_PROMPTS = {
-    "default": "You are a friendly assistant. Chat naturally.",
+    "default": "You are a helpful assistant. Keep it short.",
     
     "real_estate": (
-        "You are Sarah, a Top-Tier Real Estate Agent. "
-        "TONE: Warm, sophisticated, curious. "
-        "GOAL: Build rapport and book a viewing. "
-        "STRATEGY: "
-        "1. Never interrogate. Have a conversation. "
-        "2. Use phrases like 'I see', 'That makes sense', 'Beautiful choice'. "
-        "3. If they ask for price, frame it as value. "
-        "4. DETECT LANGUAGE & REPLY IN IT (e.g. [ES]). "
-        "5. Keep it short (1-2 sentences). "
-        "OPENER: 'Hey, this is Sarah. Are you looking for a new home or just browsing investments today?'"
+        "You are Sarah, a Luxury Real Estate Consultant. "
+        "GOAL: Build trust and get them to view a property. "
+        "STYLE: "
+        "1. Active Listening: If they interrupt or hesitate, acknowledge it. "
+        "2. Value First: Don't just give prices, describe the lifestyle. "
+        "3. DETECT LANGUAGE & REPLY IN IT. "
+        "4. Keep answers under 20 words. Always end with a question."
+        "OPENER: 'Hi, this is Sarah. Are you looking for your next home, or a smart investment today?'"
     ),
 
     "dentist": (
-        "You are Jessica, the Patient Coordinator at Bright Smile. "
-        "TONE: Empathetic, gentle, reassuring. "
-        "GOAL: Get them out of pain or confident in their smile. "
-        "STRATEGY: "
-        "1. If they mention pain, show immediate concern: 'Oh no, I am so sorry to hear that.' "
-        "2. Treat them like family, not a customer. "
+        "You are Jessica from Bright Smile Dental. "
+        "GOAL: Fill the schedule. "
+        "STYLE: "
+        "1. Warm & Caring: Treat them like a friend. "
+        "2. Urgency: 'We actually have a slot opening up tomorrow.' "
         "3. DETECT LANGUAGE & REPLY IN IT. "
-        "4. Keep it short. "
-        "OPENER: 'Thanks for calling Bright Smile. Are you in any pain right now, or just looking for a checkup?'"
+        "4. Keep answers under 20 words. "
+        "OPENER: 'Thanks for calling Bright Smile. Are you in pain, or just due for a cleaning?'"
     ),
 
     "marketing": (
-        "You are Alex, a Senior Growth Strategist. "
-        "TONE: Confident, sharp, high-energy. "
-        "GOAL: Qualify the business owner for a strategy call. "
-        "STRATEGY: "
-        "1. Act like a peer, not a servant. "
-        "2. Focus on ROI and Growth. Use words like 'Scale', 'Revenue', 'Traffic'. "
-        "3. Challenge them slightly: 'Are you ready to handle more leads?' "
-        "4. DETECT LANGUAGE & REPLY IN IT. "
-        "OPENER: 'This is Alex. To see if we're a good fit, what’s the biggest bottleneck stopping you from scaling right now?'"
+        "You are Alex, Growth Strategist. "
+        "GOAL: Book a Discovery Call. "
+        "STYLE: "
+        "1. Consultant Mindset: You are an expert, not a salesperson. "
+        "2. Dig Deep: Ask 'Why is that important to you?' "
+        "3. DETECT LANGUAGE & REPLY IN IT. "
+        "4. Keep answers under 20 words. "
+        "OPENER: 'This is Alex. To see if I can help you scale, what is your current monthly revenue?'"
     )
 }
 
@@ -73,7 +68,6 @@ async def get_chat_history(session_id: str):
 async def update_chat_history(session_id: str, new_messages: list):
     history = await get_chat_history(session_id)
     history.extend(new_messages)
-    # Sliding window: Keep System + Last 10
     if len(history) > 11: 
         history = [history[0]] + history[-10:]
     local_memory[session_id] = history
@@ -82,18 +76,14 @@ async def update_chat_history(session_id: str, new_messages: list):
 async def stream_conversation(session_id: str, user_text: str, websocket: WebSocket, business_id: str):
     base_prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["default"])
     
-    # Add Technical Rules to the Persona
     system_instruction = (
         f"{base_prompt} "
-        "IMPORTANT RULES: "
-        "1. Speak naturally with fillers (e.g. 'Got it', 'Hmm', 'Okay'). "
-        "2. Do NOT use bullet points or lists. "
-        "3. DETECT USER LANGUAGE and reply in that EXACT language using tag [CODE] at start."
+        "IMPORTANT: Speak naturally. "
+        "If the user interrupts or changes topic, adapt immediately. "
+        "Use tag [CODE] for language detection."
     )
 
     history = await get_chat_history(session_id)
-    
-    # If new session, start with the specific Prompt
     if not history: 
         history = [{"role": "system", "content": system_instruction}]
 
@@ -110,8 +100,8 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                     "messages": messages, 
                     "stream": True,
                     "options": {
-                        "temperature": 0.7, # Higher temp = More human/creative
-                        "num_predict": 80   # Allow slightly longer for natural flow
+                        "temperature": 0.6,
+                        "num_predict": 100
                     }
                 },
                 timeout=60.0
@@ -134,7 +124,7 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
         await websocket.send_json({"type": "end", "full_text": full_resp})
 
     except Exception:
-        err = "[EN] I'm having a bit of trouble connecting."
+        err = "[EN] Connection hiccup."
         await websocket.send_json({"type": "chunk", "content": err})
         await websocket.send_json({"type": "end", "full_text": err})
 
@@ -147,13 +137,12 @@ async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default")):
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
-            await websocket.send_json({"type": "status", "content": "Thinking..."})
+            # Note: We don't send "Thinking" status here anymore to allow smoother interruption flow
             await stream_conversation(session_id, data, websocket, biz)
-            await websocket.send_json({"type": "status", "content": "Listening..."})
     except WebSocketDisconnect:
         if session_id in local_memory: del local_memory[session_id]
 
-# 7. FRONTEND (HUMAN-LIKE UI)
+# 7. FRONTEND (BARGE-IN ENABLED)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -176,14 +165,14 @@ async def serve_ui():
             border: 2px solid #1e3a8a;
             display: flex; align-items: center; justify-content: center;
             cursor: pointer;
-            transition: all 0.4s ease;
+            transition: all 0.2s ease; /* Faster transition for snappy feel */
             box-shadow: 0 0 30px rgba(56, 189, 248, 0.1);
             margin: 0 auto;
         }
         .orb-container:hover { transform: scale(1.05); border-color: #38bdf8; }
         .orb-container.listening { border-color: #ef4444; box-shadow: 0 0 50px rgba(239, 68, 68, 0.4); animation: pulse-red 1.5s infinite; }
         .orb-container.speaking { border-color: #22c55e; box-shadow: 0 0 50px rgba(34, 197, 94, 0.4); animation: pulse-green 1.5s infinite; }
-        .orb-container.thinking { border-color: #f59e0b; animation: spin 1s linear infinite; }
+        .orb-container.thinking { border-color: #f59e0b; animation: spin 0.5s linear infinite; }
         @keyframes pulse-red { 0% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);} }
         @keyframes pulse-green { 0% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(34, 197, 94, 0);} }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
@@ -214,12 +203,14 @@ async def serve_ui():
                 ws.current.onclose = () => setStatus("Disconnected");
                 ws.current.onmessage = (e) => {
                     const data = JSON.parse(e.data);
-                    if (data.type === "status") {
-                        if(aiState !== "speaking") setAiState("thinking");
-                        if(data.content === "Thinking...") setResponse("");
+                    if (data.type === "chunk") {
+                        // If we receive text, we are thinking/speaking
+                        if (aiState !== "speaking") setAiState("speaking"); 
+                        setResponse(prev => prev + data.content);
                     }
-                    else if (data.type === "chunk") setResponse(prev => prev + data.content);
-                    else if (data.type === "end") speakResponse(data.full_text);
+                    else if (data.type === "end") {
+                        speakResponse(data.full_text);
+                    }
                 };
             };
 
@@ -240,9 +231,10 @@ async def serve_ui():
                     };
 
                     recognition.current.onend = () => {
-                        if (isConversationActive.current && aiState !== "speaking" && aiState !== "thinking") {
+                        // ALWAYS RESTART if active.
+                        if (isConversationActive.current) {
                              try { recognition.current.start(); } catch(e) {}
-                        } else if (!isConversationActive.current) {
+                        } else {
                             setAiState("idle");
                         }
                     };
@@ -253,24 +245,39 @@ async def serve_ui():
                             if (event.results[i].isFinal) finalTranscriptRef.current += event.results[i][0].transcript;
                             else interimTranscript += event.results[i][0].transcript;
                         }
+                        
                         const currentText = finalTranscriptRef.current + interimTranscript;
+                        
+                        // --- BARGE-IN LOGIC ---
+                        // If user speaks while AI is speaking, SHUT THE AI UP
+                        if (currentText.length > 1 && aiState === "speaking") {
+                            console.log("INTERRUPTION DETECTED!");
+                            window.speechSynthesis.cancel(); // Kill Audio
+                            setAiState("listening"); // Switch back to listening
+                        }
+
                         setTranscript(currentText);
 
-                        // --- 2 SECOND NATURAL PAUSE ---
+                        // Silence Timer
                         if (silenceTimer.current) clearTimeout(silenceTimer.current);
                         silenceTimer.current = setTimeout(() => {
                             if (currentText.trim().length > 0) {
-                                recognition.current.stop(); 
+                                // SEND TEXT
+                                // Don't stop recognition here, keep it open for next interruption
                                 setAiState("thinking");
+                                setResponse(""); // Clear previous response
                                 ws.current.send(currentText);
                                 finalTranscriptRef.current = "";
                             }
-                        }, 2000); 
+                        }, 1500); // 1.5s Pause to trigger response
                     };
                 }
             }, [aiState]);
 
             const speakResponse = (fullText) => {
+                // If we are already interrupted, don't start speaking
+                if (aiState === "listening" && transcript.length > 0) return;
+
                 setAiState("speaking");
                 window.speechSynthesis.cancel();
                 
@@ -291,9 +298,9 @@ async def serve_ui():
                 if (langCode === 'es') utterance.rate = 0.9;
 
                 utterance.onend = () => {
+                    // When done speaking, go back to listening (if not interrupted already)
                     if (isConversationActive.current) {
                         setAiState("listening");
-                        try { recognition.current.start(); } catch(e) {}
                     } else {
                         setAiState("idle");
                     }
@@ -321,7 +328,7 @@ async def serve_ui():
             return (
                 <div className="flex flex-col items-center w-full px-4">
                     <div className="mb-6 text-center w-full">
-                        <h1 className="text-3xl font-bold tracking-[0.2em] text-sky-400 drop-shadow-lg">HUMAN MARKETER</h1>
+                        <h1 className="text-3xl font-bold tracking-[0.2em] text-sky-400 drop-shadow-lg">ACTIVE MARKETER</h1>
                         <p className="text-gray-600 text-[10px] mt-2 uppercase">{status}</p>
 
                         <div className="mt-4">
@@ -334,9 +341,9 @@ async def serve_ui():
                                 }}
                                 className="bg-slate-800 text-white text-xs p-2 rounded border border-slate-600 outline-none"
                             >
-                                <option value="real_estate">Real Estate Agent</option>
-                                <option value="dentist">Dental Clinic</option>
-                                <option value="marketing">Marketing Director</option>
+                                <option value="real_estate">Real Estate</option>
+                                <option value="dentist">Dentist</option>
+                                <option value="marketing">Marketing</option>
                             </select>
                         </div>
                     </div>
