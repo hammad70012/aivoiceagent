@@ -10,18 +10,19 @@ from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
 import asyncpg
 from dotenv import load_dotenv
+from datetime import datetime
 
-# 1. LOAD CONFIGURATION
+# 1. CONFIGURATION
 load_dotenv()
 
-# KEYS & URLS
+# We use 127.0.0.1 to be safe
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 
 # 2. APP SETUP
-app = FastAPI(title="Founder Sales Agent", version="4.0.0")
+app = FastAPI(title="Founder Sales Agent (Debug)", version="5.0.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
@@ -34,18 +35,22 @@ class Infrastructure:
         self.redis = None
 
     async def connect(self):
-        try:
-            if DATABASE_URL:
-                self.pool = await asyncpg.create_pool(DATABASE_URL)
-                print(f"✅ DB Connected")
-        except: pass
-
+        # Redis
         try:
             if REDIS_URL:
                 self.redis = redis.from_url(REDIS_URL, decode_responses=True)
                 await self.redis.ping()
                 print(f"✅ Redis Connected")
-        except: pass
+        except Exception as e:
+            print(f"⚠️ Redis Error: {e}")
+
+        # Postgres
+        try:
+            if DATABASE_URL:
+                self.pool = await asyncpg.create_pool(DATABASE_URL)
+                print(f"✅ DB Connected")
+        except Exception as e:
+            print(f"⚠️ DB Error: {e}")
 
     async def disconnect(self):
         if self.pool: await self.pool.close()
@@ -53,114 +58,122 @@ class Infrastructure:
 
 infra = Infrastructure()
 
+# 4. STARTUP SELF-TEST
 @app.on_event("startup")
 async def startup():
+    print("\n🚀 STARTING SERVER...")
     await infra.connect()
+    
+    print(f"🧠 TESTING OLLAMA CONNECTION to {OLLAMA_URL}...")
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{OLLAMA_URL}/api/chat",
+                json={"model": AI_MODEL, "messages": [{"role": "user", "content": "hi"}], "stream": False},
+                timeout=10.0
+            )
+            if resp.status_code == 200:
+                print(f"✅ OLLAMA IS WORKING! Response: {resp.json()['message']['content']}")
+            else:
+                print(f"❌ OLLAMA ERROR: {resp.status_code} - {resp.text}")
+    except Exception as e:
+        print(f"❌ OLLAMA FAILED: {e}")
+        print("👉 TIP: Make sure 'ollama serve' is running in another terminal.")
 
 @app.on_event("shutdown")
 async def shutdown():
     await infra.disconnect()
 
-# 4. INTELLIGENT LAYER (FOUNDER PERSONA)
+# 5. SALES LOGIC
 async def process_conversation(session_id: str, user_text: str):
     history_key = f"founder_chat:{session_id}"
     messages = []
     
-    # --- THE FOUNDER CLOSER PROMPT ---
-    # This makes the AI sharp, concise, and focused on booking the call.
+    # SYSTEM PROMPT
     system_prompt = (
-        "You are the Founder of a high-end tech company. You are busy, professional, and direct."
-        "Your Goal: Qualify the user and book a 15-minute demo."
-        "Rules:"
-        "1. Speak naturally and confidently. No robot talk."
-        "2. Keep answers SHORT (1 sentence only). This is a voice call."
-        "3. Always end with a question to control the conversation."
-        "4. If asked 'how are you', say 'Focused. How can I help your business?'"
-        "5. Do not write lists. Do not use markdown."
+        "You are the Founder. Qualify the lead. "
+        "Short answer (1 sentence). End with a question."
     )
 
-    # 1. Load History
-    try:
-        if infra.redis:
-            raw_history = await infra.redis.get(history_key)
-            if raw_history:
-                messages = json.loads(raw_history)
-    except:
-        pass
+    # Load History
+    if infra.redis:
+        try:
+            raw = await infra.redis.get(history_key)
+            if raw: messages = json.loads(raw)
+        except: pass
 
     if not messages:
         messages = [{"role": "system", "content": system_prompt}]
     
     messages.append({"role": "user", "content": user_text})
     
-    ai_response_content = "I'm listening, go on."
+    print(f"🎤 Received: {user_text}")
 
-    # 2. SEND TO OLLAMA
-    print(f"🎤 User: {user_text}")
+    # CALL AI
+    ai_response = "Thinking..."
     
     try:
         async with httpx.AsyncClient() as client:
-            # 45 Second Timeout for slower VPS
+            # 15 SECOND HARD TIMEOUT
             response = await client.post(
                 f"{OLLAMA_URL}/api/chat",
                 json={
                     "model": AI_MODEL,
                     "messages": messages,
                     "stream": False, 
-                    "options": {
-                        "temperature": 0.6, # Lower temp = more focused
-                        "num_predict": 60   # Keep it short
-                    }
+                    "options": {"temperature": 0.6, "num_predict": 50}
                 },
-                timeout=45.0 
+                timeout=15.0 
             )
             
             if response.status_code == 200:
                 data = response.json()
-                # Extract text safely
-                if 'message' in data and 'content' in data['message']:
-                    ai_response_content = data['message']['content']
-                else:
-                    ai_response_content = "Could you repeat that? I missed it."
-                
-                print(f"🤖 AI: {ai_response_content}")
+                ai_response = data['message']['content']
+                print(f"🤖 AI Generated: {ai_response}")
             else:
-                print(f"❌ Error {response.status_code}")
-                ai_response_content = "I'm having a bad connection. Can you say that again?"
+                print(f"❌ API Error: {response.text}")
+                ai_response = "I am having trouble accessing my brain right now."
 
+    except httpx.TimeoutException:
+        print("❌ TIMEOUT: Ollama took too long.")
+        ai_response = "I'm thinking too slowly. Could you repeat that?"
     except Exception as e:
-        print(f"❌ Exception: {e}")
-        ai_response_content = "I can't hear you clearly. Are you still there?"
+        print(f"❌ EXCEPTION: {e}")
+        ai_response = "Connection error."
 
-    # 3. Update History
-    messages.append({"role": "assistant", "content": ai_response_content})
+    # Update History
+    messages.append({"role": "assistant", "content": ai_response})
     if infra.redis:
         await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
     
-    return ai_response_content
+    return ai_response
 
-# 5. WEBSOCKET HANDLER
+# 6. WEBSOCKET
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     session_id = str(id(websocket))
-    print(f"🔗 Connected: {session_id}")
+    print(f"🔗 CLIENT CONNECTED: {session_id}")
     
     try:
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
             
-            # Get Response
+            # Send 'Processing' confirmation
+            # We don't send this to UI to avoid breaking JSON, but we log it
+            
             response = await process_conversation(session_id, data)
             
-            # Send back to UI
+            # Send Response
             await websocket.send_text(response)
             
     except WebSocketDisconnect:
-        print(f"📴 Disconnected: {session_id}")
+        print(f"📴 CLIENT DISCONNECTED: {session_id}")
+    except Exception as e:
+        print(f"🔥 WEBSOCKET CRASH: {e}")
 
-# 6. FRONTEND (VISUAL FEEDBACK INCLUDED)
+# 7. FRONTEND
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -215,6 +228,8 @@ async def serve_ui():
             const [mode, setMode] = React.useState("idle");
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
+            const [debugMsg, setDebugMsg] = React.useState("");
+
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
             const isConversationActive = React.useRef(false);
@@ -222,14 +237,18 @@ async def serve_ui():
             React.useEffect(() => {
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
                 ws.current = new WebSocket(protocol + window.location.host + "/ws");
-                ws.current.onopen = () => setStatus("Connected");
-                ws.current.onclose = () => setStatus("Disconnected");
+                
+                ws.current.onopen = () => { setStatus("Connected"); setDebugMsg(""); };
+                ws.current.onclose = () => { setStatus("Disconnected"); setDebugMsg("Connection Lost"); };
+                
                 ws.current.onmessage = (e) => {
                     const text = e.data;
-                    setResponse(text); // SHOW TEXT
-                    speakResponse(text); // SPEAK AUDIO
+                    console.log("AI SAID:", text);
+                    setResponse(text);
+                    speakResponse(text);
                 };
 
+                // Initialize Speech
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
@@ -249,7 +268,8 @@ async def serve_ui():
                         if (text.trim() && isConversationActive.current) {
                             setTranscript(text);
                             setMode("processing");
-                            recognition.current.stop();
+                            recognition.current.stop(); // Stop listening while processing
+                            console.log("SENDING:", text);
                             ws.current.send(text);
                         }
                     };
@@ -300,26 +320,29 @@ async def serve_ui():
 
             return (
                 <div className="flex flex-col items-center">
-                    <div className="mb-12 text-center">
+                    <div className="mb-8 text-center">
                         <h1 className="text-4xl font-bold glow-text tracking-widest text-sky-400">FOUNDER AI</h1>
                         <p className="text-gray-500 text-sm mt-3 uppercase tracking-widest font-semibold">{status}</p>
+                        {debugMsg && <p className="text-red-500 font-bold bg-black p-2 mt-2 rounded">{debugMsg}</p>}
                     </div>
+
                     <div className={`orb-container ${mode}`} onClick={toggleConversation}>
                         <i className={`fas fa-${
                             mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'comments' : 
                             mode === 'processing' ? 'sync' : 'power-off'
                         } text-5xl text-white`}></i>
                     </div>
+
                     <div className="mt-8 text-center h-8">
                         {mode === 'listening' && <span className="text-red-400 animate-pulse font-mono">LISTENING...</span>}
                         {mode === 'speaking' && <span className="text-green-400 animate-pulse font-mono">FOUNDER SPEAKING...</span>}
                         {mode === 'processing' && <span className="text-amber-400 animate-pulse font-mono">PROCESSING...</span>}
                         {mode === 'idle' && <span className="text-gray-600 font-mono">TAP TO START CALL</span>}
                     </div>
+
                     <div className="w-full max-w-md mt-8 p-6 bg-slate-900 bg-opacity-90 rounded-xl border border-slate-800 min-h-[150px] flex flex-col justify-end shadow-2xl">
                         {transcript && <div className="self-end bg-slate-800 text-sky-100 px-4 py-2 rounded-2xl rounded-tr-none mb-3 max-w-[85%] text-sm shadow-md">{transcript}</div>}
                         {response && <div className="self-start text-white font-medium text-lg leading-relaxed">{response}</div>}
-                        {!transcript && !response && <div className="text-center text-gray-700 text-sm italic">Ready to close leads. Click the button to begin.</div>}
                     </div>
                 </div>
             );
