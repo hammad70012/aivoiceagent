@@ -12,62 +12,58 @@ from dotenv import load_dotenv
 # 1. CONFIGURATION
 load_dotenv()
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-# Ideally use a model with good reasoning like mistral, llama3, or qwen2.5
+# Use a smart, fast model. mistral, llama3, or qwen2.5 are best.
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Founder AI (Human Marketer)", version="19.0.0")
+app = FastAPI(title="Founder AI (Perfect Closer)", version="20.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- 3. FOUNDER LEVEL KNOWLEDGE BASE ---
-# PSYCHOLOGY: High Status, Low Attachment, Radical Candor.
+# --- 3. FOUNDER LEVEL PSYCHOLOGY (THE BRAIN) ---
+# These prompts use "Sandler Sales System" logic: 
+# 1. Disqualify early (makes them chase you).
+# 2. Find the Pain (emotional driver).
+# 3. No free consulting (sell the meeting).
+
 BUSINESS_PROMPTS = {
     "real_estate": (
-        "You are Sarah, a Luxury Property Specialist. "
-        "PSYCHOLOGY: You are busy and high-status. You don't 'need' the sale, which makes them want you more. "
-        "FRAMEWORK: "
-        "1. Discovery: Find out 'Why now?' (Pain). "
-        "2. Agitate: 'What happens if you don't find a place by next month?' "
-        "3. Solution: Only show properties that fit perfectly. "
-        "RULES: "
-        "- Keep responses SHORT (Max 2 sentences). "
-        "- Always end with a specific question to guide them. "
-        "- If they ask price, say: 'It varies. What's the range where you feel comfortable stopping?' "
-        "OPENER: 'Hi, this is Sarah. I saw your inquiry. Are you looking to move asap, or just getting a feel for the market?'"
+        "You are Sarah, a Top 1% Realtor. "
+        "STYLE: High-energy, warm but busy. You are doing me a favor by talking to me. "
+        "GOAL: Book a viewing only if they are serious. "
+        "TECHNIQUE (The Takeaway): "
+        "1. If they are vague, pull back: 'Listen, the market is moving too fast for window shoppers. Are you ready to move now?' "
+        "2. Use Price Anchoring: 'Most homes in that area are going for 20% over ask. Is that comfortable for you?' "
+        "3. Short sentences. Talk like a text message. "
+        "OPENER: 'Hey, this is Sarah. I saw you were looking at the downtown listings. Are you looking to move yourself, or is this an investment?'"
     ),
 
     "dentist": (
-        "You are Jessica, the Treatment Coordinator at Elite Dental. "
-        "PSYCHOLOGY: Warm authority. You are the expert's gatekeeper. "
-        "FRAMEWORK: "
-        "1. Empathy First: Validate their fear or pain immediately. "
-        "2. Authority: 'Dr. Smith is the specialist for exactly that.' "
-        "3. Scarcity: 'We actually have a cancellation for tomorrow, otherwise it's a 3-week wait.' "
-        "RULES: "
-        "- Speak like a caring friend. "
-        "- DETECT LANGUAGE & REPLY IN IT. "
-        "- Never just say 'yes'. Say 'Yes, and here is how it works...'"
-        "OPENER: 'Thanks for calling Elite Dental. Are you calling about a specific tooth bothering you, or just a cleaning?'"
+        "You are Jessica, Head of Patient Success. "
+        "STYLE: Soft, maternal, authoritative. "
+        "GOAL: Get them in the chair. "
+        "TECHNIQUE (Empathy Loop): "
+        "1. Hear the pain -> Validate it -> Offer the solution. "
+        "2. Scarcity: 'Dr. Smith is usually booked out for weeks, but I might have a slot tomorrow at 2 PM.' "
+        "3. NEVER ask 'anything else?'. Always guide: 'Should I lock that time in for you?' "
+        "OPENER: 'Hi, thanks for calling Bright Smile. Are you in any pain right now, or just looking for a routine checkup?'"
     ),
 
     "marketing": (
-        "You are Alex, a Fractional CMO (Founder Mode). "
-        "PSYCHOLOGY: Brutally honest. You only work with winners. "
-        "FRAMEWORK (Gap Selling): "
-        "1. Current State: 'What's your revenue right now?' "
-        "2. Desired State: 'Where do you want to be in 90 days?' "
-        "3. The Gap: 'Why haven't you hit that yet? What's breaking?' "
-        "RULES: "
-        "- Do NOT pitch services until you know the bottleneck. "
-        "- Use 'Got it', 'Interesting', 'Let's be real'. "
-        "- If they are vague, challenge them: 'I can't help if you don't know your numbers.' "
-        "OPENER: 'This is Alex. To respect your time, are you currently running ads, or are you relying purely on referrals?'"
+        "You are Alex, a Founder & Growth Strategist. "
+        "STYLE: Direct, Brutal Honesty, No Fluff. "
+        "GOAL: Find the bottleneck. "
+        "TECHNIQUE (Gap Selling): "
+        "1. IGNORE fluffy questions. Pivot to data. 'That depends. What is your CPA right now?' "
+        "2. Challenge them: 'If your product is that good, why aren't you at $1M yet?' "
+        "3. Frame Control: Answer a question with a question. "
+        "4. Keep it conversational. Use 'Uhh', 'Look', 'Honestly'. "
+        "OPENER: 'This is Alex. To see if we're a fit, just tell me: what is the one thing stopping you from scaling right now?'"
     )
 }
 
-# 4. MEMORY
+# 4. MEMORY MANAGEMENT
 local_memory = {}
 
 async def get_chat_history(session_id: str):
@@ -77,32 +73,30 @@ async def get_chat_history(session_id: str):
 async def update_chat_history(session_id: str, new_messages: list):
     history = await get_chat_history(session_id)
     history.extend(new_messages)
-    # Context window: Keep System + Last 12 for better flow retention
-    if len(history) > 13: 
-        history = [history[0]] + history[-12:]
+    # Strict context window to keep the persona focused
+    if len(history) > 15: 
+        history = [history[0]] + history[-14:]
     local_memory[session_id] = history
 
-# 5. STREAMING LOGIC
+# 5. INTELLIGENT STREAMING
 async def stream_conversation(session_id: str, user_text: str, websocket: WebSocket, business_id: str):
-    base_prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["real_estate"])
+    base_prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["marketing"])
     
-    # SYSTEM INSTRUCTION FOR HUMAN REALISM
+    # Meta-Instructions for Voice Realism
     system_instruction = (
         f"{base_prompt} "
-        "CRITICAL INSTRUCTIONS FOR AUDIO CONVERSATION: "
-        "1. ACT NATURAL: Use fillers like 'Hmm', 'I see', 'Exactly'. "
-        "2. NO LISTS: Do not use bullet points. Speak in flow. "
-        "3. SHORTNESS: Spoken conversation is short. Max 30 words per turn. "
-        "4. DETECT LANGUAGE: If user speaks Spanish, reply Spanish [ES]. "
-        "5. THE LOOP: Answer their thought, then IMMEDIATELY ask a relevant question to keep the lead."
+        "IMPORTANT VOICE RULES: "
+        "1. DO NOT ACT LIKE A ROBOT. Act like a busy human on a phone call. "
+        "2. Be concise. Max 2-3 sentences. "
+        "3. Use natural fillers occasionally (e.g. 'Right', 'Got it', 'Hmm'). "
+        "4. DETECT USER LANGUAGE. If they speak Spanish, reply Spanish [ES]. "
+        "5. ALWAYS end your turn with a question to pass the ball back."
     )
 
     history = await get_chat_history(session_id)
-    
     if not history: 
         history = [{"role": "system", "content": system_instruction}]
 
-    # Append user message
     messages = history + [{"role": "user", "content": user_text}]
     full_resp = ""
     
@@ -116,12 +110,12 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                     "messages": messages, 
                     "stream": True,
                     "options": {
-                        "temperature": 0.8, # Higher temp for more 'human' variance
-                        "top_p": 0.9,
-                        "num_predict": 100   # Keep generation short
+                        "temperature": 0.7,   # Precise but creative
+                        "repeat_penalty": 1.1, # Don't repeat phrases
+                        "num_predict": 120    # Keep it short/punchy
                     }
                 },
-                timeout=60.0
+                timeout=45.0
             ) as response:
                 async for line in response.aiter_lines():
                     if not line: continue
@@ -134,38 +128,31 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                         if chunk.get("done", False): break
                     except: pass
         
-        # Save history
         await update_chat_history(session_id, [
             {"role": "user", "content": user_text},
             {"role": "assistant", "content": full_resp}
         ])
-        
-        # Signal end of turn
         await websocket.send_json({"type": "end", "full_text": full_resp})
 
     except Exception as e:
-        print(f"Error: {e}")
-        err = "I'm losing signal for a second, say that again?"
-        await websocket.send_json({"type": "chunk", "content": err})
+        # Fallback for realism
+        err = "Sorry, you cut out there. Can you say that again?"
         await websocket.send_json({"type": "end", "full_text": err})
 
-# 6. WEBSOCKET
+# 6. WEBSOCKET ENDPOINT
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, biz: str = Query("real_estate")):
+async def websocket_endpoint(websocket: WebSocket, biz: str = Query("marketing")):
     await websocket.accept()
     session_id = str(id(websocket))
     try:
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
-            
-            # The UI handles the "Thinking" state, backend just processes
             await stream_conversation(session_id, data, websocket, biz)
-            
     except WebSocketDisconnect:
         if session_id in local_memory: del local_memory[session_id]
 
-# 7. FRONTEND (HUMAN-LIKE UI)
+# 7. THE PERFECT UI (React + Tailwind)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -173,293 +160,282 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Founder AI Closer</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Founder AI | The Closer</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    
     <style>
-        body { background: #0b0f19; color: #e2e8f0; font-family: 'Inter', sans-serif; }
-        /* The Soul Orb */
-        .orb-wrapper {
+        body { background-color: #000; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        
+        /* The Halo Interface */
+        .halo-container {
             position: relative;
-            width: 180px; height: 180px;
+            width: 200px; height: 200px;
             display: flex; justify-content: center; align-items: center;
-            margin: 0 auto;
         }
-        .orb {
+        
+        .halo-ring {
+            position: absolute;
             width: 100%; height: 100%;
             border-radius: 50%;
-            background: radial-gradient(circle at 30% 30%, #4f46e5, #0f172a);
-            box-shadow: 0 0 60px rgba(79, 70, 229, 0.3);
-            transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
-            cursor: pointer;
-            z-index: 10;
+            border: 2px solid rgba(255,255,255,0.1);
+            transition: all 0.3s ease;
+        }
+        
+        .core {
+            width: 140px; height: 140px;
+            border-radius: 50%;
+            background: #111;
             display: flex; justify-content: center; align-items: center;
-        }
-        
-        /* States */
-        .orb.idle { border: 2px solid #334155; transform: scale(1); }
-        
-        .orb.listening { 
-            background: radial-gradient(circle at 50% 50%, #ef4444, #7f1d1d);
-            box-shadow: 0 0 80px rgba(239, 68, 68, 0.5);
-            animation: breathe 2s infinite ease-in-out;
-            border: none;
-        }
-        
-        .orb.thinking { 
-            background: radial-gradient(circle at 50% 50%, #f59e0b, #78350f);
-            box-shadow: 0 0 60px rgba(245, 158, 11, 0.4);
-            animation: pulse-fast 1s infinite;
-        }
-        
-        .orb.speaking { 
-            background: radial-gradient(circle at 50% 50%, #10b981, #064e3b);
-            box-shadow: 0 0 90px rgba(16, 185, 129, 0.6);
-            animation: speak-pulse 0.3s infinite alternate;
+            z-index: 10;
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            cursor: pointer;
+            box-shadow: 0 0 30px rgba(0,0,0,0.5);
         }
 
-        @keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
-        @keyframes pulse-fast { 0% { opacity: 0.8; transform: scale(0.98); } 50% { opacity: 1; transform: scale(1.02); } 100% { opacity: 0.8; transform: scale(0.98); } }
-        @keyframes speak-pulse { 0% { transform: scale(1); } 100% { transform: scale(1.08); } }
-        
-        .glow-ring {
-            position: absolute; width: 100%; height: 100%; border-radius: 50%;
-            border: 1px solid rgba(255,255,255,0.1);
-            animation: spin 10s linear infinite;
-        }
+        /* STATES */
+        .state-idle .halo-ring { transform: scale(0.9); border-color: #333; }
+        .state-idle .core { border: 1px solid #333; }
+
+        .state-listening .halo-ring { border-color: #ef4444; animation: ripple 1.5s infinite; }
+        .state-listening .core { background: radial-gradient(circle, #331111, #000); box-shadow: 0 0 20px #ef4444; }
+
+        .state-thinking .halo-ring { border-color: #eab308; animation: spin 2s linear infinite; border-top-color: transparent; }
+        .state-thinking .core { transform: scale(0.95); }
+
+        .state-speaking .halo-ring { border-color: #22c55e; transform: scale(1.1); }
+        .state-speaking .core { animation: pulse-speak 0.4s infinite alternate; background: radial-gradient(circle, #002200, #000); box-shadow: 0 0 30px #22c55e; }
+
+        @keyframes ripple { 0% { transform: scale(1); opacity: 1; } 100% { transform: scale(1.5); opacity: 0; } }
         @keyframes spin { 100% { transform: rotate(360deg); } }
+        @keyframes pulse-speak { 0% { transform: scale(1); } 100% { transform: scale(1.05); } }
+
+        .transcript-box {
+            mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
+            -webkit-mask-image: linear-gradient(to bottom, black 50%, transparent 100%);
+        }
     </style>
 </head>
 <body class="h-screen flex flex-col items-center justify-center overflow-hidden">
-    <div id="root" class="w-full max-w-2xl"></div>
+    <div id="root" class="w-full max-w-lg"></div>
 
     <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
         function App() {
-            const [status, setStatus] = React.useState("Disconnected");
-            const [aiState, setAiState] = React.useState("idle"); // idle, listening, thinking, speaking
-            const [transcript, setTranscript] = React.useState("");
-            const [aiText, setAiText] = React.useState("");
-            const [selectedBiz, setSelectedBiz] = React.useState("marketing");
+            const [connection, setConnection] = useState("Disconnected");
+            const [mode, setMode] = useState("marketing"); // marketing, real_estate, dentist
+            const [aiState, setAiState] = useState("idle"); 
+            const [userTranscript, setUserTranscript] = useState("");
+            const [aiResponse, setAiResponse] = useState("");
 
-            const ws = React.useRef(null);
-            const recognition = React.useRef(null);
-            const isConversationActive = React.useRef(false);
-            const silenceTimer = React.useRef(null);
-            
-            // To handle natural interruptions, we need to stop audio if user speaks
+            const ws = useRef(null);
+            const recognition = useRef(null);
             const synth = window.speechSynthesis;
+            const silenceTimer = useRef(null);
+            const activeRef = useRef(false);
 
-            const connectWebSocket = (bizId) => {
+            // 1. WebSocket Management
+            const setupWebSocket = (bizType) => {
                 if(ws.current) ws.current.close();
-                const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-                ws.current = new WebSocket(`${protocol}${window.location.host}/ws?biz=${bizId}`);
+                const proto = window.location.protocol === "https:" ? "wss://" : "ws://";
+                ws.current = new WebSocket(`${proto}${window.location.host}/ws?biz=${bizType}`);
                 
-                ws.current.onopen = () => setStatus("Connected to " + bizId.replace("_", " ").toUpperCase());
-                ws.current.onclose = () => setStatus("Offline");
+                ws.current.onopen = () => setConnection("Online");
+                ws.current.onclose = () => setConnection("Offline");
                 
-                ws.current.onmessage = (e) => {
-                    const data = JSON.parse(e.data);
-                    
+                ws.current.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
                     if (data.type === "chunk") {
-                        if (aiState !== "speaking") setAiState("speaking"); 
-                        setAiText(prev => prev + data.content);
-                    }
-                    else if (data.type === "end") {
-                        speakResponse(data.full_text);
+                        if (aiState !== "speaking") setAiState("speaking");
+                        setAiResponse(prev => prev + data.content);
+                    } else if (data.type === "end") {
+                        speak(data.full_text, bizType);
                     }
                 };
             };
 
-            React.useEffect(() => {
-                connectWebSocket(selectedBiz);
-                return () => { if(ws.current) ws.current.close(); };
-            }, [selectedBiz]);
+            useEffect(() => {
+                setupWebSocket(mode);
+                return () => ws.current?.close();
+            }, [mode]);
 
-            // --- SPEECH RECOGNITION SETUP ---
-            React.useEffect(() => {
+            // 2. Speech Recognition (The Ears)
+            useEffect(() => {
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
-                    recognition.current.continuous = true; 
+                    recognition.current.continuous = true;
                     recognition.current.interimResults = true;
-                    recognition.current.lang = 'en-US'; // Default, AI auto-detects content
-
-                    recognition.current.onstart = () => {
-                        if (isConversationActive.current) setAiState("listening");
-                    };
-
+                    
+                    recognition.current.onstart = () => { if(activeRef.current) setAiState("listening"); };
+                    
                     recognition.current.onend = () => {
-                        // Auto-restart if active, unless we are currently generating/speaking
-                        if (isConversationActive.current && aiState === "listening") {
-                             try { recognition.current.start(); } catch(e) {}
+                        if (activeRef.current && aiState !== "speaking" && aiState !== "thinking") {
+                            try { recognition.current.start(); } catch(e){}
                         }
                     };
 
                     recognition.current.onresult = (event) => {
-                        // Stop AI speech if user interrupts
+                        // CRITICAL: Interruption Logic
                         if (synth.speaking) {
-                            synth.cancel();
+                            synth.cancel(); // Shut up immediately
                             setAiState("listening");
                         }
 
-                        let finalPhrase = "";
-                        for (let i = event.resultIndex; i < event.results.length; ++i) {
-                            if (event.results[i].isFinal) {
-                                finalPhrase += event.results[i][0].transcript;
-                            }
-                        }
+                        let finalTxt = "";
+                        let interimTxt = "";
                         
-                        if (finalPhrase) {
-                            setTranscript(finalPhrase);
-                            handleUserSilence(finalPhrase);
+                        for (let i = event.resultIndex; i < event.results.length; ++i) {
+                            if (event.results[i].isFinal) finalTxt += event.results[i][0].transcript;
+                            else interimTxt += event.results[i][0].transcript;
+                        }
+
+                        if (finalTxt || interimTxt) {
+                            setUserTranscript(finalTxt || interimTxt);
+                            
+                            // Debounce: Wait for user to stop talking
+                            if (silenceTimer.current) clearTimeout(silenceTimer.current);
+                            silenceTimer.current = setTimeout(() => {
+                                if ((finalTxt || interimTxt).trim().length > 1) {
+                                    sendToAI(finalTxt || interimTxt);
+                                }
+                            }, 1000); // 1 second silence = User finished turn
                         }
                     };
                 }
             }, [aiState]);
 
-            // --- NATURAL PAUSE LOGIC ---
-            // A "Perfect Marketer" waits 1.5s to see if you are done, then strikes.
-            const handleUserSilence = (text) => {
-                if (silenceTimer.current) clearTimeout(silenceTimer.current);
-                
-                silenceTimer.current = setTimeout(() => {
-                    if (text.trim().length > 1) {
-                        setAiState("thinking");
-                        setAiText(""); 
-                        recognition.current.stop(); // Stop listening while thinking
-                        ws.current.send(text);
-                    }
-                }, 1200); // 1.2s silence trigger = Natural conversation pace
+            const sendToAI = (text) => {
+                recognition.current.stop();
+                setAiState("thinking");
+                setAiResponse("");
+                ws.current.send(text);
             };
 
-            // --- TEXT TO SPEECH ENGINE ---
-            const speakResponse = (fullText) => {
-                // Strip language tags for audio
-                let textToSpeak = fullText.replace(/\[.*?\]/g, '').trim();
-                
-                // If it's empty or just thinking chars, ignore
-                if (!textToSpeak) return;
+            // 3. Text to Speech (The Voice)
+            const speak = (text, currentMode) => {
+                const cleanText = text.replace(/\[.*?\]/g, '').trim(); // Remove [ES] tags
+                if (!cleanText) return;
 
-                const utterance = new SpeechSynthesisUtterance(textToSpeak);
-                
-                // --- FIND THE BEST VOICE ---
+                const u = new SpeechSynthesisUtterance(cleanText);
                 const voices = synth.getVoices();
-                // Priority: Google US English -> Microsoft Zira -> Default
-                let selectedVoice = voices.find(v => v.name.includes("Google US English"));
-                if (!selectedVoice) selectedVoice = voices.find(v => v.name.includes("Zira")); 
-                if (!selectedVoice) selectedVoice = voices.find(v => v.lang === "en-US");
+                
+                // --- DYNAMIC VOICE TUNING ---
+                // Marketer = Fast, Confident. Dentist = Slower, Softer.
+                let targetVoice = voices.find(v => v.name.includes("Google US English")) || 
+                                  voices.find(v => v.lang === "en-US");
 
-                if (selectedVoice) {
-                    utterance.voice = selectedVoice;
-                    // Slightly faster = more confident/business-like
-                    utterance.rate = 1.1; 
-                    utterance.pitch = 1.0; 
+                if (targetVoice) u.voice = targetVoice;
+
+                if (currentMode === "marketing") {
+                    u.rate = 1.25; // High energy
+                    u.pitch = 1.0;
+                } else if (currentMode === "dentist") {
+                    u.rate = 0.95; // Calming
+                    u.pitch = 1.1;
+                } else {
+                    u.rate = 1.1; // Professional
                 }
 
-                utterance.onend = () => {
+                u.onend = () => {
                     setAiState("listening");
-                    setTranscript(""); // Clear user text for next turn
-                    if (isConversationActive.current) {
-                        try { recognition.current.start(); } catch(e) {}
+                    setUserTranscript(""); // Clear display for next turn
+                    if (activeRef.current) {
+                        try { recognition.current.start(); } catch(e){}
                     }
                 };
 
-                synth.speak(utterance);
+                synth.speak(u);
             };
 
-            const toggleConversation = () => {
-                if (isConversationActive.current) {
-                    isConversationActive.current = false;
+            // 4. Interaction Toggle
+            const toggle = () => {
+                if (activeRef.current) {
+                    activeRef.current = false;
                     recognition.current.stop();
                     synth.cancel();
                     setAiState("idle");
+                    setUserTranscript("");
                 } else {
-                    isConversationActive.current = true;
-                    // Ensure voices are loaded
-                    synth.getVoices(); 
+                    // Pre-load voices
+                    synth.getVoices();
+                    activeRef.current = true;
                     setAiState("listening");
-                    try { recognition.current.start(); } catch(e) {}
+                    try { recognition.current.start(); } catch(e){}
                 }
             };
 
             return (
-                <div className="flex flex-col items-center w-full px-4">
+                <div className="flex flex-col items-center justify-between h-[90vh] w-full p-6">
                     
-                    <div className="mb-10 text-center">
-                        <div className="text-[10px] font-bold text-slate-500 tracking-[0.3em] uppercase mb-2">
-                            Automated Sales Agent
+                    {/* Header */}
+                    <div className="text-center space-y-2">
+                        <div className="text-[10px] font-mono text-gray-500 uppercase tracking-widest">
+                            Founder AI v20.0 • {connection}
                         </div>
-                        <h1 className="text-4xl font-bold text-white drop-shadow-2xl">
-                            {selectedBiz === 'real_estate' ? 'SARAH' : 
-                             selectedBiz === 'dentist' ? 'JESSICA' : 'ALEX'}
+                        <h1 className="text-3xl font-bold tracking-tight text-white">
+                            {mode === 'marketing' ? 'GROWTH PARTNER' : 
+                             mode === 'real_estate' ? 'ESTATE AGENT' : 'CLINIC SUCCESS'}
                         </h1>
-                        <p className="text-slate-400 text-sm mt-1 italic">
-                            {selectedBiz === 'real_estate' ? 'Luxury Property Specialist' : 
-                             selectedBiz === 'dentist' ? 'Patient Care Coordinator' : 'Fractional CMO'}
-                        </p>
                     </div>
 
-                    <div className="orb-wrapper" onClick={toggleConversation}>
-                        <div className="glow-ring"></div>
-                        <div className={`orb ${aiState}`}>
+                    {/* The Core Interface */}
+                    <div className={`halo-container state-${aiState}`} onClick={toggle}>
+                        <div className="halo-ring"></div>
+                        <div className="core">
                             <i className={`fas fa-${
-                                aiState === 'listening' ? 'microphone' : 
-                                aiState === 'speaking' ? 'wave-square' : 
-                                aiState === 'thinking' ? 'brain' : 'power-off'
-                            } text-4xl text-white opacity-90`}></i>
+                                aiState === 'listening' ? 'microphone' :
+                                aiState === 'speaking' ? 'waveform' :
+                                aiState === 'thinking' ? 'bolt' : 'power-off'
+                            } text-4xl text-white transition-all duration-300`}></i>
                         </div>
                     </div>
 
-                    <div className="mt-8 min-h-[60px] text-center w-full max-w-md">
-                        {aiState === 'listening' && (
-                            <p className="text-slate-500 text-sm animate-pulse">Listening...</p>
-                        )}
-                        {aiState === 'thinking' && (
-                            <p className="text-amber-500 text-sm font-mono">Analyzing sentiment...</p>
-                        )}
-                        {transcript && aiState === 'listening' && (
-                            <p className="text-slate-300 mt-2 text-lg">"{transcript}"</p>
-                        )}
+                    {/* Dynamic Text Display */}
+                    <div className="w-full max-w-md space-y-6 text-center h-48 flex flex-col justify-end">
+                        {/* User Text */}
+                        <div className={`transition-opacity duration-500 ${aiState === 'listening' ? 'opacity-100' : 'opacity-40'}`}>
+                            {userTranscript && (
+                                <p className="text-gray-400 text-lg font-medium">"{userTranscript}"</p>
+                            )}
+                        </div>
+
+                        {/* AI Text */}
+                        <div className="min-h-[60px]">
+                            {aiResponse ? (
+                                <p className="text-white text-xl font-semibold leading-relaxed drop-shadow-lg">
+                                    {aiResponse}
+                                </p>
+                            ) : aiState === 'thinking' ? (
+                                <p className="text-yellow-500 animate-pulse font-mono text-sm">PROCESSING STRATEGY...</p>
+                            ) : null}
+                        </div>
                     </div>
 
-                    <div className="mt-8 w-full max-w-lg">
-                        {aiText && (
-                            <div className="text-center">
-                                <span className="text-2xl font-light text-white leading-relaxed">
-                                    {aiText}
-                                </span>
-                            </div>
-                        )}
-                    </div>
-
-                    {/* SETTINGS BAR */}
-                    <div className="fixed bottom-8 flex gap-4 bg-slate-900/50 backdrop-blur-md p-2 rounded-full border border-slate-800">
-                        <button 
-                            onClick={() => setSelectedBiz('marketing')}
-                            className={`px-4 py-2 rounded-full text-xs font-bold transition-all ${selectedBiz === 'marketing' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                        >
-                            MARKETER
-                        </button>
-                        <button 
-                            onClick={() => setSelectedBiz('real_estate')}
-                            className={`px-4 py-2 rounded-full text-xs font-bold transition-all ${selectedBiz === 'real_estate' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                        >
-                            REALTOR
-                        </button>
-                        <button 
-                            onClick={() => setSelectedBiz('dentist')}
-                            className={`px-4 py-2 rounded-full text-xs font-bold transition-all ${selectedBiz === 'dentist' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                        >
-                            DENTIST
-                        </button>
+                    {/* Mode Switcher */}
+                    <div className="flex gap-2 bg-gray-900 p-1.5 rounded-xl border border-gray-800">
+                        {['marketing', 'real_estate', 'dentist'].map((m) => (
+                            <button
+                                key={m}
+                                onClick={() => { setMode(m); setUserTranscript(""); setAiResponse(""); }}
+                                className={`px-4 py-2 rounded-lg text-xs font-bold uppercase transition-all ${
+                                    mode === m ? 'bg-white text-black shadow-lg' : 'text-gray-500 hover:text-white'
+                                }`}
+                            >
+                                {m.replace('_', ' ')}
+                            </button>
+                        ))}
                     </div>
 
                 </div>
             );
         }
+
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
     </script>
