@@ -139,7 +139,7 @@ async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default"), 
     except WebSocketDisconnect:
         pass
 
-# 7. FRONTEND (ROBUST NOISE FILTERING)
+# 7. FRONTEND (ROBUST NOISE FILTERING & ECHO CANCELLATION)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -244,7 +244,7 @@ async def serve_ui():
             // --- STATE CONTROL ---
             const shouldListen = React.useRef(false); 
             const isProcessingAudio = React.useRef(false);
-            const aiStartTime = React.useRef(0); 
+            const currentAiText = React.useRef(""); // Tracks exactly what AI is saying
             const clientId = React.useRef(Math.random().toString(36).substring(7)).current;
 
             React.useEffect(() => {
@@ -301,45 +301,53 @@ async def serve_ui():
                         }
                     }
 
-                    const detectedText = finalTranscript || interim;
+                    const detectedText = (finalTranscript || interim).trim();
+                    if (!detectedText) return;
 
-                    // --- STRICT NOISE FILTER ---
-                    // 1. If text is very short (< 10 chars) AND it is NOT final, it's likely noise/breath.
-                    //    We only allow short text if the browser is 100% sure it's a finished sentence (isFinal).
-                    if (!isFinalResult && detectedText.length < 10) {
-                        return; // IGNORE THIS INPUT COMPLETELY
-                    }
-
-                    // --- INTERRUPTION LOGIC ---
-                    // If AI is speaking...
+                    // --- INTELLIGENT INTERRUPTION LOGIC ---
                     if (isProcessingAudio.current) {
-                        // 2. SELF-ECHO SHIELD: Ignore input for 1.5s after AI starts speaking
-                        const timeSinceStart = Date.now() - aiStartTime.current;
-                        if (timeSinceStart < 1500) {
+                        
+                        // 1. ECHO DETECTION (Compare Input vs Output)
+                        // If the microphone hears the same text the AI is speaking, ignore it.
+                        const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9]/g, '');
+                        const inputClean = normalize(detectedText);
+                        const outputClean = normalize(currentAiText.current);
+                        
+                        // If input is a substring of what is being spoken, it is an echo.
+                        if (outputClean.includes(inputClean) && inputClean.length > 2) {
+                            console.log("Echo detected (Ignored):", detectedText);
                             return; 
                         }
 
-                        // 3. VALID INTERRUPTION:
-                        // If we reach here, it means:
-                        // A) The input is Final (e.g. "Stop.") 
-                        // B) OR The input is Interim but Long (e.g. "Wait a second...")
-                        // This prevents random noise from stopping the AI.
-                        console.log("Valid Interruption detected: " + detectedText);
-                        synth.cancel(); 
-                        audioQueue.current = [];
-                        isProcessingAudio.current = false;
-                        setState("listening");
+                        // 2. HUMAN VOICE DETECTED (Valid Interruption)
+                        // Allow short "commands" or longer sentences.
+                        const stopWords = ['stop', 'wait', 'hold', 'pause', 'cancel', 'no', 'listen'];
+                        const isCommand = stopWords.some(w => detectedText.toLowerCase().includes(w));
+                        
+                        // Strict filter: Needs to be a command OR a substantial phrase (>8 chars) to interrupt
+                        if (isCommand || detectedText.length > 8) {
+                            console.log("Interruption triggered by:", detectedText);
+                            synth.cancel();
+                            audioQueue.current = [];
+                            isProcessingAudio.current = false;
+                            currentAiText.current = ""; // Reset
+                            setState("listening");
+                        } else {
+                             // Too short/ambiguous during speech -> likely noise
+                             return; 
+                        }
                     }
 
-                    // --- PROCESS USER INPUT ---
-                    if (detectedText.length > 0) {
-                        setTranscript(detectedText);
-                        
-                        if (silenceTimer.current) clearTimeout(silenceTimer.current);
-                        silenceTimer.current = setTimeout(() => {
+                    // --- PROCESS USER INPUT (Only if not just an ignored echo) ---
+                    setTranscript(detectedText);
+                    
+                    if (silenceTimer.current) clearTimeout(silenceTimer.current);
+                    silenceTimer.current = setTimeout(() => {
+                        // Only send if we are actively listening (and didn't just interrupt)
+                        if (detectedText.length > 1) { 
                             sendToAi(detectedText);
-                        }, 2500); 
-                    }
+                        }
+                    }, 2000); 
                 };
             };
 
@@ -360,6 +368,7 @@ async def serve_ui():
             const playNextSentence = () => {
                 if (audioQueue.current.length === 0) {
                     isProcessingAudio.current = false;
+                    currentAiText.current = "";
                     if (shouldListen.current) {
                         setState("listening");
                         setTranscript(""); 
@@ -371,21 +380,29 @@ async def serve_ui():
                 }
 
                 isProcessingAudio.current = true;
-                aiStartTime.current = Date.now(); 
                 setState("speaking");
                 
                 const txt = audioQueue.current.shift();
+                currentAiText.current = txt; // Store what we are about to say for echo cancellation
                 setTranscript(txt); 
 
                 const utter = new SpeechSynthesisUtterance(txt);
                 const voices = synth.getVoices();
+                // Select specific voice preference
                 let v = voices.find(v => v.name.includes("Google US English"));
                 if(!v) v = voices.find(v => v.name.includes("Zira"));
                 if(v) utter.voice = v;
+                
                 utter.rate = 1.0; 
                 utter.onend = () => { 
+                    currentAiText.current = ""; // Clear text when done
                     if (isProcessingAudio.current) playNextSentence(); 
                 };
+                utter.onerror = () => {
+                     currentAiText.current = "";
+                     if (isProcessingAudio.current) playNextSentence();
+                };
+
                 synth.speak(utter);
             };
 
@@ -400,6 +417,7 @@ async def serve_ui():
                     recognition.current.stop();
                     synth.cancel();
                     isProcessingAudio.current = false;
+                    audioQueue.current = [];
                 }
             };
 
