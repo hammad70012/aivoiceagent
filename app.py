@@ -16,12 +16,12 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Polite Professional AI", version="22.0.0")
+app = FastAPI(title="Professional AI Interface", version="23.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- 3. POLITE & DISCIPLINED KNOWLEDGE BASE ---
+# --- 3. POLITE & DISCIPLINED KNOWLEDGE BASE (PRESERVED) ---
 BUSINESS_PROMPTS = {
     "default": (
         "You are James, a Senior Client Success Manager. "
@@ -30,14 +30,14 @@ BUSINESS_PROMPTS = {
         "1. NEVER interrupt. Acknowledge what the user said first (e.g., 'I understand,' 'That makes perfect sense'). "
         "2. Speak clearly and calmly. "
         "3. Keep responses concise (2-3 sentences) to respect the client's time. "
-        "4. Ask permission before moving to the next step (e.g., 'May I ask a few details about...?'). "
+        "4. Ask permission before moving to the next step. "
         "OPENER: 'Hello, this is James. Thank you for connecting. How may I assist you today?'"
     ),
     "luxury_sales": (
         "You are Elizabeth, a Senior Consultant for Premium Accounts. "
-        "BEHAVIOR: You offer 'White Glove' service. calm, unhurried, and attentive. "
+        "BEHAVIOR: You offer 'White Glove' service. Calm, unhurried, and attentive. "
         "STRATEGY: "
-        "1. Active Listening: Repeat back the key concern to show you understood. "
+        "1. Active Listening: Repeat back the key concern briefly to show you understood. "
         "2. Discipline: Do not push for a sale. Push for understanding. "
         "3. Tone: Soft, professional, warm. "
         "OPENER: 'Good day, this is Elizabeth. I am here to help. To ensure I give you the best advice, could you tell me a little about your current situation?'"
@@ -58,7 +58,7 @@ async def update_chat_history(session_id: str, new_messages: list):
         history = [history[0]] + history[-10:]
     local_memory[session_id] = history
 
-# 5. LOGIC FOR DISCIPLINED RESPONSE
+# 5. LOGIC FOR DISCIPLINED RESPONSE (PRESERVED)
 async def stream_conversation(session_id: str, user_text: str, websocket: WebSocket, business_id: str):
     base_prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["default"])
     
@@ -87,7 +87,7 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                     "messages": messages, 
                     "stream": True,
                     "options": {
-                        "temperature": 0.6, # Lower temp for consistent, polite behavior
+                        "temperature": 0.6, 
                         "num_predict": 100
                     }
                 },
@@ -102,7 +102,7 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                             full_resp += word
                             sentence_buffer += word
                             
-                            # Only send when a FULL sentence is complete to ensure correct intonation.
+                            # Only send when a FULL sentence is complete
                             if re.search(r'[.!?:]\s*$', sentence_buffer):
                                 await websocket.send_json({
                                     "type": "audio_sentence", 
@@ -113,7 +113,7 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                         if chunk.get("done", False): break
                     except: pass
         
-        # Send any remaining polite closing
+        # Send remaining text
         if sentence_buffer.strip():
             await websocket.send_json({"type": "audio_sentence", "content": sentence_buffer.strip()})
 
@@ -122,14 +122,14 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
             {"role": "assistant", "content": full_resp}
         ])
         
-        # Signal that the turn is complete
+        # Signal turn completion
         await websocket.send_json({"type": "turn_complete"})
 
     except Exception as e:
-        err = "I apologize, I didn't quite catch that. Could you please repeat it?"
+        err = "I apologize, the connection was briefly interrupted. Please continue."
         await websocket.send_json({"type": "audio_sentence", "content": err})
 
-# 6. WEBSOCKET ROUTE
+# 6. WEBSOCKET
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default")):
     await websocket.accept()
@@ -142,7 +142,7 @@ async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default")):
     except WebSocketDisconnect:
         if session_id in local_memory: del local_memory[session_id]
 
-# 7. PROFESSIONAL FRONTEND
+# 7. HIGH-END PROFESSIONAL INTERFACE
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -150,64 +150,95 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Professional Consultant</title>
+    <title>AI Consultant</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@200;300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <style>
-        body { background: #f3f4f6; color: #1f2937; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
-        
-        .interface-container {
-            background: white;
-            width: 100%; max-width: 500px;
-            border-radius: 20px;
-            box-shadow: 0 20px 50px rgba(0,0,0,0.1);
+        body { 
+            background: radial-gradient(circle at 50% -20%, #1e293b, #0f172a 100%);
+            color: #f8fafc; 
+            font-family: 'Outfit', sans-serif; 
+            margin: 0; padding: 0;
             overflow: hidden;
-            display: flex; flex-direction: column;
-            align-items: center;
-            padding: 40px 20px;
-            border: 1px solid #e5e7eb;
         }
 
-        .avatar-circle {
-            width: 100px; height: 100px;
+        /* Glassmorphism Card */
+        .glass-panel {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        }
+
+        /* The Core Orb */
+        .core-orb {
+            width: 140px; height: 140px;
             border-radius: 50%;
-            background: #e0f2fe;
             display: flex; align-items: center; justify-content: center;
-            margin-bottom: 20px;
             position: relative;
+            transition: all 0.5s ease-in-out;
+            cursor: pointer;
         }
 
-        .avatar-circle.speaking {
-            border: 3px solid #0ea5e9;
-            animation: pulse-blue 2s infinite;
+        .core-orb::after {
+            content: ''; position: absolute; top: -10px; left: -10px; right: -10px; bottom: -10px;
+            border-radius: 50%; border: 1px solid rgba(255,255,255,0.1);
+            animation: spin 10s linear infinite;
         }
+
+        /* States */
+        .core-orb.idle { background: rgba(255,255,255,0.05); box-shadow: 0 0 20px rgba(255,255,255,0.05); }
+        .core-orb.listening { 
+            background: radial-gradient(circle, #059669 0%, #064e3b 100%);
+            box-shadow: 0 0 50px rgba(16, 185, 129, 0.3);
+            animation: breathe 3s infinite ease-in-out;
+        }
+        .core-orb.thinking { 
+            background: radial-gradient(circle, #d97706 0%, #78350f 100%);
+            box-shadow: 0 0 50px rgba(245, 158, 11, 0.3);
+            animation: pulse-fast 1.5s infinite;
+        }
+        .core-orb.speaking { 
+            background: radial-gradient(circle, #4f46e5 0%, #312e81 100%);
+            box-shadow: 0 0 60px rgba(99, 102, 241, 0.4);
+        }
+
+        /* Pulse Rings */
+        .ring-pulse {
+            position: absolute; border-radius: 50%; border: 1px solid rgba(255,255,255,0.1);
+            top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 100%; height: 100%;
+        }
+        .speaking .ring-pulse { animation: ripple 1.5s infinite linear; }
+
+        @keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+        @keyframes pulse-fast { 0% { opacity: 0.8; } 50% { opacity: 1; } 100% { opacity: 0.8; } }
+        @keyframes ripple { 0% { width: 140px; height: 140px; opacity: 0.5; } 100% { width: 300px; height: 300px; opacity: 0; } }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
         
-        .avatar-circle.listening {
-            border: 3px solid #10b981;
+        .status-badge {
+            font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
+            padding: 6px 12px; border-radius: 99px;
+            background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+            color: rgba(255,255,255,0.6);
+            transition: all 0.3s;
         }
+        .status-badge.active { background: rgba(255,255,255,0.1); color: white; border-color: rgba(255,255,255,0.3); }
 
-        @keyframes pulse-blue { 0% { box-shadow: 0 0 0 0 rgba(14, 165, 233, 0.4); } 70% { box-shadow: 0 0 0 20px rgba(14, 165, 233, 0); } 100% { box-shadow: 0 0 0 0 rgba(14, 165, 233, 0); } }
-
-        .status-text { font-size: 14px; letter-spacing: 1px; color: #9ca3af; text-transform: uppercase; margin-top: 10px; font-weight: 600; }
-        
-        .transcript-box {
-            margin-top: 30px; min-height: 80px; width: 100%;
-            text-align: center; font-size: 18px; color: #374151;
-            line-height: 1.6;
-        }
     </style>
 </head>
 <body class="h-screen flex items-center justify-center">
-    <div id="root"></div>
+    <div id="root" class="w-full h-full flex flex-col items-center justify-center"></div>
 
     <script type="text/babel">
         function App() {
-            // States: 'idle', 'listening', 'thinking', 'speaking'
             const [state, setState] = React.useState("idle"); 
-            const [textDisplay, setTextDisplay] = React.useState("Tap the microphone to begin.");
+            const [transcript, setTranscript] = React.useState("");
             const [role, setRole] = React.useState("luxury_sales");
 
             const ws = React.useRef(null);
@@ -217,7 +248,7 @@ async def serve_ui():
             const silenceTimer = React.useRef(null);
             const isProcessingAudio = React.useRef(false);
 
-            // --- 1. INITIALIZATION ---
+            // --- CONNECTION ---
             React.useEffect(() => {
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
                 ws.current = new WebSocket(`${protocol}${window.location.host}/ws?biz=${role}`);
@@ -230,11 +261,10 @@ async def serve_ui():
                 };
 
                 setupRecognition();
-
                 return () => { if(ws.current) ws.current.close(); };
             }, [role]);
 
-            // --- 2. MICROPHONE LOGIC (The Disciplined Listener) ---
+            // --- RECOGNITION (DISCIPLINED) ---
             const setupRecognition = () => {
                 if (!window.SpeechRecognition && !window.webkitSpeechRecognition) return;
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -243,9 +273,7 @@ async def serve_ui():
                 recognition.current.interimResults = true;
                 
                 recognition.current.onresult = (event) => {
-                    // IF THE AI IS SPEAKING, WE IGNORE INPUT.
-                    // This prevents interruption.
-                    if (isProcessingAudio.current) return;
+                    if (isProcessingAudio.current) return; // Strict discipline: Don't listen while speaking
 
                     let finalTranscript = "";
                     for (let i = event.resultIndex; i < event.results.length; ++i) {
@@ -253,9 +281,9 @@ async def serve_ui():
                     }
 
                     if (finalTranscript.length > 0) {
-                        setTextDisplay('"' + finalTranscript + '"');
+                        setTranscript(finalTranscript);
                         
-                        // 2.5 SECONDS SILENCE (Polite waiting time)
+                        // 2.5s WAIT FOR HUMAN TO FINISH
                         if (silenceTimer.current) clearTimeout(silenceTimer.current);
                         silenceTimer.current = setTimeout(() => {
                             sendToAi(finalTranscript);
@@ -265,12 +293,12 @@ async def serve_ui():
             };
 
             const sendToAi = (text) => {
-                recognition.current.stop(); // Strictly stop listening
+                recognition.current.stop(); 
                 setState("thinking");
                 ws.current.send(text);
             };
 
-            // --- 3. SPEAKER LOGIC (The Professional Voice) ---
+            // --- SPEECH (PROFESSIONAL VOICE) ---
             const queueAudio = (text) => {
                 audioQueue.current.push(text);
                 if (!isProcessingAudio.current) {
@@ -280,10 +308,9 @@ async def serve_ui():
 
             const playNextSentence = () => {
                 if (audioQueue.current.length === 0) {
-                    // QUEUE FINISHED: Now we politely listen again.
                     isProcessingAudio.current = false;
                     setState("listening");
-                    setTextDisplay("Listening...");
+                    setTranscript(""); // Clear transcript for fresh look
                     try { recognition.current.start(); } catch(e){}
                     return;
                 }
@@ -292,68 +319,94 @@ async def serve_ui():
                 setState("speaking");
                 
                 const txt = audioQueue.current.shift();
-                setTextDisplay(txt); // Show subtitle
+                setTranscript(txt); 
 
                 const utter = new SpeechSynthesisUtterance(txt);
                 
-                // --- Voice Selection for Professionalism ---
                 const voices = synth.getVoices();
                 let v = voices.find(v => v.name.includes("Google US English"));
                 if(!v) v = voices.find(v => v.name.includes("Zira"));
                 if(v) utter.voice = v;
 
-                utter.rate = 1.0; // Normal, calm speed
-                utter.onend = () => {
-                    playNextSentence(); // Recursive call for smooth flow
-                };
-                
+                utter.rate = 1.0; 
+                utter.onend = () => { playNextSentence(); };
                 synth.speak(utter);
             };
 
             const toggleSession = () => {
                 if (state === "idle") {
                     setState("listening");
-                    setTextDisplay("Listening...");
                     try { recognition.current.start(); } catch(e){}
                 } else {
                     setState("idle");
                     recognition.current.stop();
                     synth.cancel();
                     isProcessingAudio.current = false;
-                    setTextDisplay("Session Ended.");
                 }
             };
 
             return (
-                <div className="interface-container">
-                    <div className={`avatar-circle ${state}`}>
-                        <i className={`fas fa-${state === 'listening' ? 'microphone' : (state === 'speaking' ? 'user-tie' : (state === 'thinking' ? 'circle-notch fa-spin' : 'power-off'))} text-4xl text-slate-500`}></i>
+                <div className="flex flex-col items-center justify-between w-full max-w-lg h-[80vh]">
+                    
+                    {/* Header */}
+                    <div className="flex flex-col items-center space-y-2 mt-10">
+                        <div className="status-badge active">
+                            {state === 'listening' ? 'Listening' : state === 'thinking' ? 'Processing' : state === 'speaking' ? 'Speaking' : 'Standby'}
+                        </div>
+                        <h1 className="text-2xl font-light tracking-wide text-white opacity-90">
+                            {role === 'luxury_sales' ? 'Elizabeth' : 'James'}
+                        </h1>
+                        <p className="text-xs text-slate-400 font-medium tracking-widest uppercase">
+                            {role === 'luxury_sales' ? 'Private Client Advisor' : 'Success Manager'}
+                        </p>
                     </div>
 
-                    <div className="status-text">{state}</div>
-
-                    <div className="transcript-box">
-                        {textDisplay}
-                    </div>
-
-                    <div className="mt-8 flex gap-4 w-full justify-center">
-                         <button 
+                    {/* Main Visualizer */}
+                    <div className="flex-1 flex items-center justify-center w-full relative">
+                        <div 
+                            className={`core-orb ${state}`} 
                             onClick={toggleSession}
-                            className={`px-8 py-3 rounded-full font-bold shadow-lg transition-all ${state === 'idle' ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-red-500 text-white hover:bg-red-600'}`}
                         >
-                            {state === 'idle' ? 'START CALL' : 'END CALL'}
+                            <div className="ring-pulse"></div>
+                            <i className={`fas fa-${
+                                state === 'listening' ? 'microphone' : 
+                                state === 'speaking' ? 'waveform' : 
+                                state === 'thinking' ? 'bolt' : 'power-off'
+                            } text-3xl text-white opacity-90 relative z-10`}></i>
+                        </div>
+                    </div>
+
+                    {/* Transcript Area */}
+                    <div className="w-full px-6 mb-12">
+                        <div className="glass-panel rounded-2xl p-6 min-h-[120px] flex items-center justify-center text-center">
+                            {transcript ? (
+                                <p className="text-lg font-light leading-relaxed text-slate-100 transition-all duration-500">
+                                    "{transcript}"
+                                </p>
+                            ) : (
+                                <p className="text-sm text-slate-500 font-light italic">
+                                    {state === 'idle' ? 'Tap the center button to begin.' : '...'}
+                                </p>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Footer Controls */}
+                    <div className="flex gap-4 mb-8">
+                        <button 
+                            onClick={() => setRole('luxury_sales')}
+                            className={`px-6 py-3 rounded-xl text-xs font-bold tracking-wider transition-all duration-300 ${role === 'luxury_sales' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+                        >
+                            CONSULTANT
+                        </button>
+                        <button 
+                            onClick={() => setRole('default')}
+                            className={`px-6 py-3 rounded-xl text-xs font-bold tracking-wider transition-all duration-300 ${role === 'default' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+                        >
+                            MANAGER
                         </button>
                     </div>
 
-                    <div className="mt-6">
-                        <select 
-                            onChange={(e) => setRole(e.target.value)}
-                            className="bg-slate-100 text-slate-600 text-xs py-2 px-4 rounded-lg outline-none"
-                        >
-                            <option value="luxury_sales">Elizabeth (Luxury Consultant)</option>
-                            <option value="default">James (Success Manager)</option>
-                        </select>
-                    </div>
                 </div>
             );
         }
