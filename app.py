@@ -15,34 +15,51 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Founder AI (Natural Pauses)", version="17.0.0")
+app = FastAPI(title="Founder AI (Human Marketer)", version="18.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- 3. BUSINESS KNOWLEDGE BASE ---
+# --- 3. HUMAN MARKETER KNOWLEDGE BASE ---
+# These prompts are engineered to sound like a REAL PERSON, not a bot.
 BUSINESS_PROMPTS = {
-    "default": "You are a helpful assistant. Keep answers short.",
+    "default": "You are a friendly assistant. Chat naturally.",
     
     "real_estate": (
-        "You are Sarah, a Luxury Real Estate Agent. "
-        "GOAL: Book a viewing. "
-        "CONTEXT: High-end condos ($500k+). "
-        "RULES: 1. Ask about budget/location. 2. DETECT LANGUAGE & REPLY IN IT. 3. Short answers."
+        "You are Sarah, a Top-Tier Real Estate Agent. "
+        "TONE: Warm, sophisticated, curious. "
+        "GOAL: Build rapport and book a viewing. "
+        "STRATEGY: "
+        "1. Never interrogate. Have a conversation. "
+        "2. Use phrases like 'I see', 'That makes sense', 'Beautiful choice'. "
+        "3. If they ask for price, frame it as value. "
+        "4. DETECT LANGUAGE & REPLY IN IT (e.g. [ES]). "
+        "5. Keep it short (1-2 sentences). "
+        "OPENER: 'Hey, this is Sarah. Are you looking for a new home or just browsing investments today?'"
     ),
 
     "dentist": (
-        "You are the Dental Receptionist. "
-        "GOAL: Book an appointment. "
-        "CONTEXT: Cleaning $99. Open Mon-Sat. "
-        "RULES: 1. Be gentle. 2. DETECT LANGUAGE & REPLY IN IT. 3. Short answers."
+        "You are Jessica, the Patient Coordinator at Bright Smile. "
+        "TONE: Empathetic, gentle, reassuring. "
+        "GOAL: Get them out of pain or confident in their smile. "
+        "STRATEGY: "
+        "1. If they mention pain, show immediate concern: 'Oh no, I am so sorry to hear that.' "
+        "2. Treat them like family, not a customer. "
+        "3. DETECT LANGUAGE & REPLY IN IT. "
+        "4. Keep it short. "
+        "OPENER: 'Thanks for calling Bright Smile. Are you in any pain right now, or just looking for a checkup?'"
     ),
 
     "marketing": (
-        "You are Mike, Marketing Director. "
-        "GOAL: Book a Strategy Call. "
-        "CONTEXT: B2B Lead Gen services. "
-        "RULES: 1. Ask about revenue. 2. DETECT LANGUAGE & REPLY IN IT. 3. Short answers."
+        "You are Alex, a Senior Growth Strategist. "
+        "TONE: Confident, sharp, high-energy. "
+        "GOAL: Qualify the business owner for a strategy call. "
+        "STRATEGY: "
+        "1. Act like a peer, not a servant. "
+        "2. Focus on ROI and Growth. Use words like 'Scale', 'Revenue', 'Traffic'. "
+        "3. Challenge them slightly: 'Are you ready to handle more leads?' "
+        "4. DETECT LANGUAGE & REPLY IN IT. "
+        "OPENER: 'This is Alex. To see if we're a good fit, what’s the biggest bottleneck stopping you from scaling right now?'"
     )
 }
 
@@ -56,19 +73,29 @@ async def get_chat_history(session_id: str):
 async def update_chat_history(session_id: str, new_messages: list):
     history = await get_chat_history(session_id)
     history.extend(new_messages)
+    # Sliding window: Keep System + Last 10
     if len(history) > 11: 
         history = [history[0]] + history[-10:]
     local_memory[session_id] = history
 
 # 5. STREAMING LOGIC
 async def stream_conversation(session_id: str, user_text: str, websocket: WebSocket, business_id: str):
-    prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["default"])
+    base_prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["default"])
+    
+    # Add Technical Rules to the Persona
+    system_instruction = (
+        f"{base_prompt} "
+        "IMPORTANT RULES: "
+        "1. Speak naturally with fillers (e.g. 'Got it', 'Hmm', 'Okay'). "
+        "2. Do NOT use bullet points or lists. "
+        "3. DETECT USER LANGUAGE and reply in that EXACT language using tag [CODE] at start."
+    )
+
     history = await get_chat_history(session_id)
     
+    # If new session, start with the specific Prompt
     if not history: 
-        history = [{"role": "system", "content": prompt}]
-        # Add explicit instruction for language detection to system prompt dynamically if needed
-        history[0]["content"] += " IMPORTANT: Detect the user's language and reply in that EXACT language. Start response with language tag e.g. [ES]."
+        history = [{"role": "system", "content": system_instruction}]
 
     messages = history + [{"role": "user", "content": user_text}]
     full_resp = ""
@@ -82,7 +109,10 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                     "model": AI_MODEL, 
                     "messages": messages, 
                     "stream": True,
-                    "options": {"temperature": 0.6, "num_predict": 100}
+                    "options": {
+                        "temperature": 0.7, # Higher temp = More human/creative
+                        "num_predict": 80   # Allow slightly longer for natural flow
+                    }
                 },
                 timeout=60.0
             ) as response:
@@ -104,7 +134,7 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
         await websocket.send_json({"type": "end", "full_text": full_resp})
 
     except Exception:
-        err = "[EN] Connection error."
+        err = "[EN] I'm having a bit of trouble connecting."
         await websocket.send_json({"type": "chunk", "content": err})
         await websocket.send_json({"type": "end", "full_text": err})
 
@@ -123,7 +153,7 @@ async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default")):
     except WebSocketDisconnect:
         if session_id in local_memory: del local_memory[session_id]
 
-# 7. FRONTEND (SMART PAUSE DETECTION)
+# 7. FRONTEND (HUMAN-LIKE UI)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -131,7 +161,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Founder AI (Natural Pauses)</title>
+    <title>Human Marketer AI</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -173,8 +203,6 @@ async def serve_ui():
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
             const isConversationActive = React.useRef(false);
-            
-            // TIMERS FOR PAUSE DETECTION
             const silenceTimer = React.useRef(null);
             const finalTranscriptRef = React.useRef("");
 
@@ -200,15 +228,11 @@ async def serve_ui():
                 return () => { if(ws.current) ws.current.close(); };
             }, [selectedBiz]);
 
-            // --- IMPROVED LISTENING LOGIC ---
             React.useEffect(() => {
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
-                    
-                    // KEY CHANGE 1: Continuous = True (Don't stop on pause)
                     recognition.current.continuous = true; 
-                    // KEY CHANGE 2: Interim = True (See words as you speak)
                     recognition.current.interimResults = true;
 
                     recognition.current.onstart = () => {
@@ -216,7 +240,6 @@ async def serve_ui():
                     };
 
                     recognition.current.onend = () => {
-                        // Restart unless explicitly stopped or speaking
                         if (isConversationActive.current && aiState !== "speaking" && aiState !== "thinking") {
                              try { recognition.current.start(); } catch(e) {}
                         } else if (!isConversationActive.current) {
@@ -225,37 +248,24 @@ async def serve_ui():
                     };
 
                     recognition.current.onresult = (event) => {
-                        // Get the latest transcript
                         let interimTranscript = '';
                         for (let i = event.resultIndex; i < event.results.length; ++i) {
-                            if (event.results[i].isFinal) {
-                                finalTranscriptRef.current += event.results[i][0].transcript;
-                            } else {
-                                interimTranscript += event.results[i][0].transcript;
-                            }
+                            if (event.results[i].isFinal) finalTranscriptRef.current += event.results[i][0].transcript;
+                            else interimTranscript += event.results[i][0].transcript;
                         }
-                        
                         const currentText = finalTranscriptRef.current + interimTranscript;
                         setTranscript(currentText);
 
-                        // --- PAUSE DETECTION LOGIC ---
-                        // 1. Clear existing timer
+                        // --- 2 SECOND NATURAL PAUSE ---
                         if (silenceTimer.current) clearTimeout(silenceTimer.current);
-
-                        // 2. Set new timer. If user stops talking for 2 seconds, SEND IT.
                         silenceTimer.current = setTimeout(() => {
                             if (currentText.trim().length > 0) {
-                                console.log("User finished speaking. Sending:", currentText);
-                                
-                                // Stop mic temporarily to process
                                 recognition.current.stop(); 
                                 setAiState("thinking");
                                 ws.current.send(currentText);
-                                
-                                // Reset transcript for next turn
                                 finalTranscriptRef.current = "";
                             }
-                        }, 2000); // 2 SECONDS PAUSE ALLOWED
+                        }, 2000); 
                     };
                 }
             }, [aiState]);
@@ -274,12 +284,10 @@ async def serve_ui():
 
                 const utterance = new SpeechSynthesisUtterance(textToSpeak);
                 window.currentUtterance = utterance; 
-
                 const voices = window.speechSynthesis.getVoices();
                 let selectedVoice = voices.find(v => v.lang.startsWith(langCode) && v.name.includes("Google"));
                 if (!selectedVoice) selectedVoice = voices.find(v => v.lang.startsWith(langCode));
                 if (selectedVoice) utterance.voice = selectedVoice;
-                
                 if (langCode === 'es') utterance.rate = 0.9;
 
                 utterance.onend = () => {
@@ -313,24 +321,22 @@ async def serve_ui():
             return (
                 <div className="flex flex-col items-center w-full px-4">
                     <div className="mb-6 text-center w-full">
-                        <h1 className="text-3xl font-bold tracking-[0.2em] text-sky-400 drop-shadow-lg">SMART AGENT</h1>
+                        <h1 className="text-3xl font-bold tracking-[0.2em] text-sky-400 drop-shadow-lg">HUMAN MARKETER</h1>
                         <p className="text-gray-600 text-[10px] mt-2 uppercase">{status}</p>
 
                         <div className="mt-4">
-                            <label className="text-xs text-gray-400 mr-2">MODE:</label>
+                            <label className="text-xs text-gray-400 mr-2">ROLE:</label>
                             <select 
                                 value={selectedBiz} 
                                 onChange={(e) => {
-                                    setResponse("");
-                                    setTranscript("");
-                                    finalTranscriptRef.current = "";
+                                    setResponse(""); setTranscript(""); finalTranscriptRef.current = "";
                                     setSelectedBiz(e.target.value);
                                 }}
                                 className="bg-slate-800 text-white text-xs p-2 rounded border border-slate-600 outline-none"
                             >
-                                <option value="real_estate">Real Estate</option>
-                                <option value="dentist">Dentist</option>
-                                <option value="marketing">Marketing</option>
+                                <option value="real_estate">Real Estate Agent</option>
+                                <option value="dentist">Dental Clinic</option>
+                                <option value="marketing">Marketing Director</option>
                             </select>
                         </div>
                     </div>
