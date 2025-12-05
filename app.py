@@ -17,12 +17,12 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Professional AI Interface", version="25.0.0")
+app = FastAPI(title="Professional AI Interface", version="26.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- 3. KNOWLEDGE BASE WITH SUGGESTION LOGIC ---
+# --- 3. KNOWLEDGE BASE (POLITE & DISCIPLINED) ---
 BUSINESS_PROMPTS = {
     "default": (
         "You are James, a Senior Client Success Manager. "
@@ -30,7 +30,7 @@ BUSINESS_PROMPTS = {
         "INSTRUCTION: "
         "1. Acknowledge user input first. "
         "2. Keep response under 3 sentences. "
-        "3. At the end, provide 2 or 3 short follow-up options for the user enclosed in double angle brackets like this: <<Pricing details|Book a demo>>. "
+        "3. At the end, provide 2 short follow-up options for the user enclosed in double angle brackets like this: <<Pricing details|Book a demo>>. "
         "OPENER: 'Hello, this is James. Thank you for connecting. How may I assist you today? <<I have a question|Tell me about services>>'"
     ),
     "luxury_sales": (
@@ -44,7 +44,7 @@ BUSINESS_PROMPTS = {
     )
 }
 
-# 4. PERSISTENT MEMORY (Using Client ID)
+# 4. PERSISTENT MEMORY
 local_memory = {}
 
 async def get_chat_history(client_id: str):
@@ -54,12 +54,11 @@ async def get_chat_history(client_id: str):
 async def update_chat_history(client_id: str, new_messages: list):
     history = await get_chat_history(client_id)
     history.extend(new_messages)
-    # Increased Memory Window: Keep System + Last 20 turns
     if len(history) > 21: 
         history = [history[0]] + history[-20:]
     local_memory[client_id] = history
 
-# 5. STREAMING LOGIC WITH SUGGESTION PARSING
+# 5. STREAMING LOGIC
 async def stream_conversation(client_id: str, user_text: str, websocket: WebSocket, business_id: str):
     base_prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["default"])
     
@@ -88,7 +87,7 @@ async def stream_conversation(client_id: str, user_text: str, websocket: WebSock
                     "stream": True,
                     "options": {
                         "temperature": 0.6, 
-                        "num_predict": 150 # Slightly longer to allow for options
+                        "num_predict": 150
                     }
                 },
                 timeout=45.0
@@ -102,7 +101,7 @@ async def stream_conversation(client_id: str, user_text: str, websocket: WebSock
                             full_resp += word
                             sentence_buffer += word
                             
-                            # Check for sentence endings, but NOT if we are inside the << brackets
+                            # Send complete sentences (ignoring text inside <<options>>)
                             if re.search(r'[.!?:]\s*$', sentence_buffer) and "<<" not in sentence_buffer:
                                 await websocket.send_json({
                                     "type": "audio_sentence", 
@@ -113,7 +112,6 @@ async def stream_conversation(client_id: str, user_text: str, websocket: WebSock
                         if chunk.get("done", False): break
                     except: pass
         
-        # Send remaining text (which likely contains the options <<...>>)
         if sentence_buffer.strip():
             await websocket.send_json({"type": "audio_sentence", "content": sentence_buffer.strip()})
 
@@ -128,25 +126,20 @@ async def stream_conversation(client_id: str, user_text: str, websocket: WebSock
         err = "I apologize, the connection was briefly interrupted. Please continue."
         await websocket.send_json({"type": "audio_sentence", "content": err})
 
-# 6. WEBSOCKET WITH CLIENT ID
+# 6. WEBSOCKET
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default"), client_id: str = Query(None)):
     await websocket.accept()
-    
-    # Use provided client_id or generate one if missing (fallback)
-    # Ideally, frontend generates this once and sends it every time.
     final_id = client_id if client_id else str(uuid.uuid4())
-    
     try:
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
             await stream_conversation(final_id, data, websocket, biz)
     except WebSocketDisconnect:
-        # We do NOT delete memory here, so if they reconnect, memory persists.
         pass
 
-# 7. FRONTEND
+# 7. FRONTEND (INTERRUPTION LOGIC ADDED)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -252,15 +245,14 @@ async def serve_ui():
             const synth = window.speechSynthesis;
             const audioQueue = React.useRef([]);
             const silenceTimer = React.useRef(null);
+            
+            // --- STATE CONTROL ---
             const shouldListen = React.useRef(false); 
             const isProcessingAudio = React.useRef(false);
-            
-            // Generate a persistent Client ID for memory
             const clientId = React.useRef(Math.random().toString(36).substring(7)).current;
 
             React.useEffect(() => {
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-                // PASS CLIENT ID TO BACKEND
                 ws.current = new WebSocket(`${protocol}${window.location.host}/ws?biz=${role}&client_id=${clientId}`);
                 
                 ws.current.onmessage = (event) => {
@@ -274,25 +266,16 @@ async def serve_ui():
                 return () => { if(ws.current) ws.current.close(); };
             }, [role]);
 
-            // --- SUGGESTION PARSING LOGIC ---
             const handleIncomingAudio = (text) => {
-                // Regex to extract <<Option1|Option2>>
                 const suggestionMatch = text.match(/<<(.+?)>>/);
-                
                 let cleanText = text;
-                
                 if (suggestionMatch) {
                     const rawOptions = suggestionMatch[1];
                     const options = rawOptions.split('|').map(o => o.trim());
-                    setSuggestions(options); // Update UI buttons
-                    
-                    // Remove the suggestions from the spoken text
+                    setSuggestions(options); 
                     cleanText = text.replace(/<<.+?>>/, '').trim();
                 }
-
-                if (cleanText) {
-                    queueAudio(cleanText);
-                }
+                if (cleanText) queueAudio(cleanText);
             };
 
             const setupRecognition = () => {
@@ -303,14 +286,26 @@ async def serve_ui():
                 recognition.current.interimResults = true;
                 
                 recognition.current.onend = () => {
-                    if (shouldListen.current && !isProcessingAudio.current) {
+                    // Always restart recognition if we are in a session
+                    // Even if AI is speaking, we want to listen for interruptions
+                    if (shouldListen.current) {
                         try { recognition.current.start(); } catch(e) {}
                     }
                 };
 
                 recognition.current.onresult = (event) => {
-                    if (isProcessingAudio.current || state === "thinking") return; 
+                    
+                    // --- 1. USER INTERRUPTS AI ---
+                    // If AI is speaking and we detect input, SHUT THE AI UP
+                    if (isProcessingAudio.current) {
+                         console.log("Interruption Detected!");
+                         synth.cancel(); // Stop talking
+                         audioQueue.current = []; // Clear queue
+                         isProcessingAudio.current = false;
+                         setState("listening");
+                    }
 
+                    // --- 2. CAPTURE INPUT ---
                     let finalTranscript = "";
                     for (let i = event.resultIndex; i < event.results.length; ++i) {
                         if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
@@ -318,6 +313,10 @@ async def serve_ui():
 
                     if (finalTranscript.length > 0) {
                         setTranscript(finalTranscript);
+                        
+                        // --- 3. PATIENCE LOGIC ---
+                        // Reset timer on every word. 
+                        // Wait 2.5s silence before replying.
                         if (silenceTimer.current) clearTimeout(silenceTimer.current);
                         silenceTimer.current = setTimeout(() => {
                             sendToAi(finalTranscript);
@@ -327,9 +326,13 @@ async def serve_ui():
             };
 
             const sendToAi = (text) => {
+                // When we decide to send to AI, we temporarily stop recognition
+                // to avoid picking up the AI's own voice (if no headphones)
+                // But we restart it immediately after sending.
                 recognition.current.stop(); 
+                
                 setState("thinking");
-                setSuggestions([]); // Clear old suggestions
+                setSuggestions([]); 
                 ws.current.send(text);
             };
 
@@ -365,7 +368,10 @@ async def serve_ui():
                 if(!v) v = voices.find(v => v.name.includes("Zira"));
                 if(v) utter.voice = v;
                 utter.rate = 1.0; 
-                utter.onend = () => { playNextSentence(); };
+                utter.onend = () => { 
+                    // Only continue if not interrupted
+                    if (isProcessingAudio.current) playNextSentence(); 
+                };
                 synth.speak(utter);
             };
 
@@ -383,7 +389,6 @@ async def serve_ui():
                 }
             };
 
-            // CLICKING A SUGGESTION
             const clickSuggestion = (text) => {
                 setTranscript(text);
                 sendToAi(text);
@@ -421,7 +426,6 @@ async def serve_ui():
                             )}
                         </div>
 
-                        {/* SUGGESTION CHIPS */}
                         {suggestions.length > 0 && state !== 'thinking' && (
                             <div className="flex flex-wrap justify-center gap-2 animate-pulse">
                                 {suggestions.map((s, i) => (
