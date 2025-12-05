@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 import sys
-import httpx  # We use this for direct, reliable connection
+import httpx # PIP INSTALL HTTPX
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -15,27 +15,26 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # KEYS & URLS
-# Ensure this points to where 'ollama serve' is running
+# We use 127.0.0.1 to avoid localhost resolution issues
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 
 # 2. APP SETUP
-app = FastAPI(title="Ollama Sales Agent", version="3.0.0")
+app = FastAPI(title="Ollama Sales Agent", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# 3. INFRASTRUCTURE (DB & REDIS)
+# 3. INFRASTRUCTURE
 class Infrastructure:
     def __init__(self):
         self.pool = None
         self.redis = None
 
     async def connect(self):
-        # Postgres
         try:
             if DATABASE_URL:
                 self.pool = await asyncpg.create_pool(DATABASE_URL)
@@ -43,7 +42,6 @@ class Infrastructure:
         except Exception as e:
             print(f"⚠️ DB Warning: {e}")
 
-        # Redis
         try:
             if REDIS_URL:
                 self.redis = redis.from_url(REDIS_URL, decode_responses=True)
@@ -66,19 +64,17 @@ async def startup():
 async def shutdown():
     await infra.disconnect()
 
-# 4. INTELLIGENT LAYER (DIRECT API CALL)
+# 4. INTELLIGENT LAYER (ROBUST HTTP CLIENT)
 async def process_conversation(session_id: str, user_text: str):
     history_key = f"ollama_sales_chat:{session_id}"
     messages = []
     
-    # --- SALES SYSTEM PROMPT ---
+    # System Prompt
     system_prompt = (
-        "You are Alex, an elite Sales Closer. "
-        "Your ONLY goal is to qualify this lead and book a meeting. "
-        "RULES:"
-        "1. Keep responses SHORT (1 sentence maximum). "
-        "2. Do not use bullet points or lists."
-        "3. Always end with a relevant question."
+        "You are Alex, a professional Sales Closer. "
+        "Your goal is to book a meeting. "
+        "Reply in 1 short sentence. "
+        "Always ask a question."
     )
 
     # 1. Load History
@@ -87,7 +83,7 @@ async def process_conversation(session_id: str, user_text: str):
             raw_history = await infra.redis.get(history_key)
             if raw_history:
                 messages = json.loads(raw_history)
-    except Exception:
+    except:
         pass
 
     if not messages:
@@ -95,88 +91,81 @@ async def process_conversation(session_id: str, user_text: str):
     
     messages.append({"role": "user", "content": user_text})
     
-    ai_response_content = ""
+    ai_response_content = "I am processing your request..."
 
-    # 2. Call Ollama (Direct HTTP for Reliability)
-    print(f"🤔 Sending to Ollama ({AI_MODEL})...")
+    # 2. Call Ollama directly
+    print(f"🔹 Sending to Ollama: {user_text}")
     
     try:
         async with httpx.AsyncClient() as client:
+            # We use a 30 second timeout because CPU inference can be slow
             response = await client.post(
                 f"{OLLAMA_URL}/api/chat",
                 json={
                     "model": AI_MODEL,
                     "messages": messages,
-                    "stream": False,  # Important: No streaming prevents hanging
+                    "stream": False, 
                     "options": {
-                        "temperature": 0.6,
-                        "num_predict": 60 
+                        "temperature": 0.7,
+                        "num_predict": 100
                     }
                 },
-                timeout=15.0 # 15 Seconds Max Wait
+                timeout=30.0 
             )
             
             if response.status_code == 200:
                 data = response.json()
-                ai_response_content = data['message']['content']
-                print(f"✅ Ollama replied: {ai_response_content}")
+                # support both 'message' and 'response' keys depending on version
+                if 'message' in data:
+                    ai_response_content = data['message']['content']
+                elif 'response' in data:
+                    ai_response_content = data['response']
+                else:
+                    ai_response_content = str(data)
+                
+                print(f"✅ Ollama Output: {ai_response_content}")
             else:
-                print(f"❌ Ollama Error {response.status_code}: {response.text}")
-                return "I'm having a technical issue. Can we talk later?"
+                print(f"❌ Ollama Error Status: {response.status_code}")
+                ai_response_content = "I am having trouble connecting to my brain."
 
     except httpx.ConnectError:
-        print("❌ Could not connect to Ollama. Is 'ollama serve' running?")
-        return "I can't connect to my brain right now. Please check the server."
+        print("❌ Connection Refused. Is 'ollama serve' running?")
+        ai_response_content = "Please start the Ollama server."
     except httpx.TimeoutException:
-        print("❌ Ollama timed out generating response.")
-        return "I'm thinking a bit too slow today. Could you repeat that?"
+        print("❌ Timeout. Model is too slow.")
+        ai_response_content = "I am thinking too slowly. Please try again."
     except Exception as e:
-        print(f"❌ Unexpected Error: {e}")
-        return "Sorry, I lost my train of thought."
+        print(f"❌ Error: {e}")
+        ai_response_content = "System error occurred."
 
     # 3. Update History
     messages.append({"role": "assistant", "content": ai_response_content})
     if infra.redis:
         await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
     
-    # 4. Log to DB
-    if infra.pool:
-        asyncio.create_task(save_log(session_id, user_text, ai_response_content))
-
     return ai_response_content
-
-async def save_log(session_id, user, ai):
-    try:
-        async with infra.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO conversation_logs (session_id, user_msg, ai_msg, model_used) VALUES ($1, $2, $3, $4)",
-                session_id, user, ai, AI_MODEL
-            )
-    except:
-        pass
 
 # 5. WEBSOCKET HANDLER
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     session_id = str(id(websocket))
-    print(f"🔗 Lead Connected: {session_id}")
+    print(f"🔗 Connected: {session_id}")
     
     try:
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
             
-            # Send processing to sales logic
+            # Get Response
             response = await process_conversation(session_id, data)
             
-            # Send back to UI
+            # FORCE SEND - Ensure data is sent back
+            print(f"📤 Sending to UI: {response}")
             await websocket.send_text(response)
             
     except WebSocketDisconnect:
-        print(f"📴 Lead Disconnected: {session_id}")
-    except Exception as e:
-        print(f"🔥 Critical WebSocket Error: {e}")
+        print(f"📴 Disconnected: {session_id}")
 
 # 6. FRONTEND
 @app.get("/", response_class=HTMLResponse)
@@ -256,10 +245,17 @@ async def serve_ui():
                 
                 ws.current.onmessage = (e) => {
                     const text = e.data;
+                    console.log("Received from AI:", text); // Debug log
                     setResponse(text);
-                    speakResponse(text);
+                    if (text && text.length > 0) {
+                        speakResponse(text);
+                    } else {
+                        // If empty response, go back to listening immediately
+                        if (isConversationActive.current) setMode("listening");
+                    }
                 };
 
+                // Init Speech Recognition
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
@@ -280,6 +276,7 @@ async def serve_ui():
                             setTranscript(text);
                             setMode("processing");
                             recognition.current.stop();
+                            console.log("Sending:", text);
                             ws.current.send(text);
                         }
                     };
@@ -289,19 +286,50 @@ async def serve_ui():
 
             const speakResponse = (text) => {
                 setMode("speaking");
-                const synth = window.speechSynthesis;
+                
+                // Clear any previous speech
+                window.speechSynthesis.cancel();
+
                 const utterance = new SpeechSynthesisUtterance(text);
-                let voices = synth.getVoices();
+                
+                // Voice Selection Logic
+                let voices = window.speechSynthesis.getVoices();
                 const setVoice = () => {
-                    utterance.voice = voices.find(v => v.name === "Google US English") || 
-                                      voices.find(v => v.name.includes("Zira")) || voices[0];
+                    const selected = voices.find(v => v.name === "Google US English") || 
+                                     voices.find(v => v.name.includes("Zira")) || 
+                                     voices.find(v => v.lang.startsWith("en-US")) || 
+                                     voices[0];
+                    if (selected) utterance.voice = selected;
                 }
-                if (!voices.length) { synth.onvoiceschanged = () => { voices = synth.getVoices(); setVoice(); synth.speak(utterance); }; } 
-                else { setVoice(); synth.speak(utterance); }
-                utterance.rate = 1.1; 
+
+                if (!voices.length) { 
+                    window.speechSynthesis.onvoiceschanged = () => { 
+                        voices = window.speechSynthesis.getVoices(); 
+                        setVoice(); 
+                        window.speechSynthesis.speak(utterance); 
+                    }; 
+                } else { 
+                    setVoice(); 
+                    window.speechSynthesis.speak(utterance); 
+                }
+
+                utterance.rate = 1.0; 
+                utterance.pitch = 1.0;
+
                 utterance.onend = () => {
-                    if (isConversationActive.current) { setMode("listening"); try { recognition.current.start(); } catch(e) {} } 
-                    else { setMode("idle"); }
+                    console.log("Speech ended");
+                    if (isConversationActive.current) { 
+                        setMode("listening"); 
+                        try { recognition.current.start(); } catch(e) {} 
+                    } else { 
+                        setMode("idle"); 
+                    }
+                };
+                
+                // Backup: If speech fails to start, reset mode after 3s
+                utterance.onerror = () => {
+                     console.error("Speech Error");
+                     if (isConversationActive.current) setMode("listening");
                 };
             };
 
@@ -352,5 +380,4 @@ async def serve_ui():
     """
 
 if __name__ == "__main__":
-    # Ensure you install httpx: pip install httpx
     uvicorn.run("main:app", host="0.0.0.0", port=5047, reload=True)
