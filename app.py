@@ -16,20 +16,20 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Professional AI Interface", version="23.0.0")
+app = FastAPI(title="Professional AI Interface", version="24.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- 3. POLITE & DISCIPLINED KNOWLEDGE BASE (PRESERVED) ---
+# --- 3. KNOWLEDGE BASE (PRESERVED) ---
 BUSINESS_PROMPTS = {
     "default": (
         "You are James, a Senior Client Success Manager. "
         "BEHAVIOR: Extremely polite, patient, and respectful. "
         "RULES: "
-        "1. NEVER interrupt. Acknowledge what the user said first (e.g., 'I understand,' 'That makes perfect sense'). "
+        "1. NEVER interrupt. Acknowledge what the user said first. "
         "2. Speak clearly and calmly. "
-        "3. Keep responses concise (2-3 sentences) to respect the client's time. "
+        "3. Keep responses concise (2-3 sentences). "
         "4. Ask permission before moving to the next step. "
         "OPENER: 'Hello, this is James. Thank you for connecting. How may I assist you today?'"
     ),
@@ -37,7 +37,7 @@ BUSINESS_PROMPTS = {
         "You are Elizabeth, a Senior Consultant for Premium Accounts. "
         "BEHAVIOR: You offer 'White Glove' service. Calm, unhurried, and attentive. "
         "STRATEGY: "
-        "1. Active Listening: Repeat back the key concern briefly to show you understood. "
+        "1. Active Listening: Repeat back the key concern briefly. "
         "2. Discipline: Do not push for a sale. Push for understanding. "
         "3. Tone: Soft, professional, warm. "
         "OPENER: 'Good day, this is Elizabeth. I am here to help. To ensure I give you the best advice, could you tell me a little about your current situation?'"
@@ -58,7 +58,7 @@ async def update_chat_history(session_id: str, new_messages: list):
         history = [history[0]] + history[-10:]
     local_memory[session_id] = history
 
-# 5. LOGIC FOR DISCIPLINED RESPONSE (PRESERVED)
+# 5. STREAMING LOGIC (PRESERVED)
 async def stream_conversation(session_id: str, user_text: str, websocket: WebSocket, business_id: str):
     base_prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["default"])
     
@@ -102,7 +102,6 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                             full_resp += word
                             sentence_buffer += word
                             
-                            # Only send when a FULL sentence is complete
                             if re.search(r'[.!?:]\s*$', sentence_buffer):
                                 await websocket.send_json({
                                     "type": "audio_sentence", 
@@ -113,7 +112,6 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                         if chunk.get("done", False): break
                     except: pass
         
-        # Send remaining text
         if sentence_buffer.strip():
             await websocket.send_json({"type": "audio_sentence", "content": sentence_buffer.strip()})
 
@@ -122,7 +120,6 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
             {"role": "assistant", "content": full_resp}
         ])
         
-        # Signal turn completion
         await websocket.send_json({"type": "turn_complete"})
 
     except Exception as e:
@@ -142,7 +139,7 @@ async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default")):
     except WebSocketDisconnect:
         if session_id in local_memory: del local_memory[session_id]
 
-# 7. HIGH-END PROFESSIONAL INTERFACE
+# 7. HIGH-END UI WITH "ALWAYS-ON" MIC
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -166,7 +163,6 @@ async def serve_ui():
             overflow: hidden;
         }
 
-        /* Glassmorphism Card */
         .glass-panel {
             background: rgba(255, 255, 255, 0.03);
             backdrop-filter: blur(20px);
@@ -175,7 +171,6 @@ async def serve_ui():
             box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
         }
 
-        /* The Core Orb */
         .core-orb {
             width: 140px; height: 140px;
             border-radius: 50%;
@@ -191,7 +186,6 @@ async def serve_ui():
             animation: spin 10s linear infinite;
         }
 
-        /* States */
         .core-orb.idle { background: rgba(255,255,255,0.05); box-shadow: 0 0 20px rgba(255,255,255,0.05); }
         .core-orb.listening { 
             background: radial-gradient(circle, #059669 0%, #064e3b 100%);
@@ -208,7 +202,6 @@ async def serve_ui():
             box-shadow: 0 0 60px rgba(99, 102, 241, 0.4);
         }
 
-        /* Pulse Rings */
         .ring-pulse {
             position: absolute; border-radius: 50%; border: 1px solid rgba(255,255,255,0.1);
             top: 50%; left: 50%; transform: translate(-50%, -50%);
@@ -246,7 +239,10 @@ async def serve_ui():
             const synth = window.speechSynthesis;
             const audioQueue = React.useRef([]);
             const silenceTimer = React.useRef(null);
-            const isProcessingAudio = React.useRef(false);
+            
+            // --- NEW REFS FOR ALWAYS-ON LISTENING ---
+            const shouldListen = React.useRef(false); // Controls if we WANT to be listening
+            const isProcessingAudio = React.useRef(false); // Controls if AI is currently talking
 
             // --- CONNECTION ---
             React.useEffect(() => {
@@ -264,7 +260,7 @@ async def serve_ui():
                 return () => { if(ws.current) ws.current.close(); };
             }, [role]);
 
-            // --- RECOGNITION (DISCIPLINED) ---
+            // --- RECOGNITION SETUP ---
             const setupRecognition = () => {
                 if (!window.SpeechRecognition && !window.webkitSpeechRecognition) return;
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -272,8 +268,22 @@ async def serve_ui():
                 recognition.current.continuous = true; 
                 recognition.current.interimResults = true;
                 
+                // IMPORTANT: AUTO-RESTART LOGIC
+                recognition.current.onend = () => {
+                    // If we are supposed to be listening, but browser stopped it, RESTART.
+                    if (shouldListen.current && !isProcessingAudio.current) {
+                        try {
+                            console.log("Auto-restarting microphone...");
+                            recognition.current.start(); 
+                        } catch(e) {
+                            console.log("Mic restart ignored (already active)");
+                        }
+                    }
+                };
+
                 recognition.current.onresult = (event) => {
-                    if (isProcessingAudio.current) return; // Strict discipline: Don't listen while speaking
+                    // Strict Discipline: Ignore input if AI is speaking/thinking
+                    if (isProcessingAudio.current || state === "thinking") return; 
 
                     let finalTranscript = "";
                     for (let i = event.resultIndex; i < event.results.length; ++i) {
@@ -293,12 +303,13 @@ async def serve_ui():
             };
 
             const sendToAi = (text) => {
+                // Pause listening while AI thinks
                 recognition.current.stop(); 
                 setState("thinking");
                 ws.current.send(text);
             };
 
-            // --- SPEECH (PROFESSIONAL VOICE) ---
+            // --- SPEECH OUTPUT ---
             const queueAudio = (text) => {
                 audioQueue.current.push(text);
                 if (!isProcessingAudio.current) {
@@ -308,10 +319,16 @@ async def serve_ui():
 
             const playNextSentence = () => {
                 if (audioQueue.current.length === 0) {
+                    // FINISHED SPEAKING -> RESUME LISTENING
                     isProcessingAudio.current = false;
-                    setState("listening");
-                    setTranscript(""); // Clear transcript for fresh look
-                    try { recognition.current.start(); } catch(e){}
+                    
+                    if (shouldListen.current) {
+                        setState("listening");
+                        setTranscript(""); 
+                        try { recognition.current.start(); } catch(e){}
+                    } else {
+                        setState("idle");
+                    }
                     return;
                 }
 
@@ -333,11 +350,16 @@ async def serve_ui():
                 synth.speak(utter);
             };
 
+            // --- TOGGLE BUTTON ---
             const toggleSession = () => {
-                if (state === "idle") {
+                if (!shouldListen.current) {
+                    // START
+                    shouldListen.current = true;
                     setState("listening");
                     try { recognition.current.start(); } catch(e){}
                 } else {
+                    // STOP
+                    shouldListen.current = false;
                     setState("idle");
                     recognition.current.stop();
                     synth.cancel();
@@ -348,9 +370,8 @@ async def serve_ui():
             return (
                 <div className="flex flex-col items-center justify-between w-full max-w-lg h-[80vh]">
                     
-                    {/* Header */}
                     <div className="flex flex-col items-center space-y-2 mt-10">
-                        <div className="status-badge active">
+                        <div className={`status-badge ${state === 'idle' ? '' : 'active'}`}>
                             {state === 'listening' ? 'Listening' : state === 'thinking' ? 'Processing' : state === 'speaking' ? 'Speaking' : 'Standby'}
                         </div>
                         <h1 className="text-2xl font-light tracking-wide text-white opacity-90">
@@ -361,7 +382,6 @@ async def serve_ui():
                         </p>
                     </div>
 
-                    {/* Main Visualizer */}
                     <div className="flex-1 flex items-center justify-center w-full relative">
                         <div 
                             className={`core-orb ${state}`} 
@@ -376,7 +396,6 @@ async def serve_ui():
                         </div>
                     </div>
 
-                    {/* Transcript Area */}
                     <div className="w-full px-6 mb-12">
                         <div className="glass-panel rounded-2xl p-6 min-h-[120px] flex items-center justify-center text-center">
                             {transcript ? (
@@ -391,7 +410,6 @@ async def serve_ui():
                         </div>
                     </div>
 
-                    {/* Footer Controls */}
                     <div className="flex gap-4 mb-8">
                         <button 
                             onClick={() => setRole('luxury_sales')}
