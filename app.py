@@ -17,7 +17,7 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Professional AI Interface", version="27.0.0")
+app = FastAPI(title="Professional AI Interface", version="28.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
@@ -139,7 +139,7 @@ async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default"), 
     except WebSocketDisconnect:
         pass
 
-# 7. FRONTEND (WITH INTERRUPTION SHIELD)
+# 7. FRONTEND (ROBUST NOISE FILTERING)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -244,7 +244,7 @@ async def serve_ui():
             // --- STATE CONTROL ---
             const shouldListen = React.useRef(false); 
             const isProcessingAudio = React.useRef(false);
-            const aiStartTime = React.useRef(0); // Tracks when AI started speaking
+            const aiStartTime = React.useRef(0); 
             const clientId = React.useRef(Math.random().toString(36).substring(7)).current;
 
             React.useEffect(() => {
@@ -288,47 +288,56 @@ async def serve_ui():
                 };
 
                 recognition.current.onresult = (event) => {
-                    // --- INTELLIGENT INTERRUPTION LOGIC ---
-                    
                     let interim = "";
                     let finalTranscript = "";
+                    let isFinalResult = false;
 
                     for (let i = event.resultIndex; i < event.results.length; ++i) {
-                        if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
-                        else interim += event.results[i][0].transcript;
+                        if (event.results[i].isFinal) {
+                            finalTranscript += event.results[i][0].transcript;
+                            isFinalResult = true;
+                        } else {
+                            interim += event.results[i][0].transcript;
+                        }
                     }
 
                     const detectedText = finalTranscript || interim;
 
-                    // 1. GHOST INPUT FILTER:
-                    // If the text is very short (noise/breath), ignore it completely.
-                    if (detectedText.trim().length < 2) return;
+                    // --- STRICT NOISE FILTER ---
+                    // 1. If text is very short (< 10 chars) AND it is NOT final, it's likely noise/breath.
+                    //    We only allow short text if the browser is 100% sure it's a finished sentence (isFinal).
+                    if (!isFinalResult && detectedText.length < 10) {
+                        return; // IGNORE THIS INPUT COMPLETELY
+                    }
 
-                    // 2. SELF-INTERRUPTION SHIELD:
-                    // If AI is speaking, ONLY interrupt if it's been speaking for > 1.5 seconds.
-                    // This ignores the echo of the AI's own voice at the start.
+                    // --- INTERRUPTION LOGIC ---
+                    // If AI is speaking...
                     if (isProcessingAudio.current) {
+                        // 2. SELF-ECHO SHIELD: Ignore input for 1.5s after AI starts speaking
                         const timeSinceStart = Date.now() - aiStartTime.current;
                         if (timeSinceStart < 1500) {
-                            // IGNORE INPUT (Likely Echo)
                             return; 
                         }
 
-                        // If we passed the shield, and text is significant, STOP AI.
-                        console.log("Valid Interruption detected.");
+                        // 3. VALID INTERRUPTION:
+                        // If we reach here, it means:
+                        // A) The input is Final (e.g. "Stop.") 
+                        // B) OR The input is Interim but Long (e.g. "Wait a second...")
+                        // This prevents random noise from stopping the AI.
+                        console.log("Valid Interruption detected: " + detectedText);
                         synth.cancel(); 
                         audioQueue.current = [];
                         isProcessingAudio.current = false;
                         setState("listening");
                     }
 
-                    // 3. PROCESS USER INPUT
-                    if (finalTranscript.length > 0) {
-                        setTranscript(finalTranscript);
+                    // --- PROCESS USER INPUT ---
+                    if (detectedText.length > 0) {
+                        setTranscript(detectedText);
                         
                         if (silenceTimer.current) clearTimeout(silenceTimer.current);
                         silenceTimer.current = setTimeout(() => {
-                            sendToAi(finalTranscript);
+                            sendToAi(detectedText);
                         }, 2500); 
                     }
                 };
@@ -362,7 +371,7 @@ async def serve_ui():
                 }
 
                 isProcessingAudio.current = true;
-                aiStartTime.current = Date.now(); // MARK START TIME
+                aiStartTime.current = Date.now(); 
                 setState("speaking");
                 
                 const txt = audioQueue.current.shift();
