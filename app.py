@@ -17,12 +17,12 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Professional AI Interface", version="26.0.0")
+app = FastAPI(title="Professional AI Interface", version="27.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- 3. KNOWLEDGE BASE (POLITE & DISCIPLINED) ---
+# --- 3. KNOWLEDGE BASE (PRESERVED) ---
 BUSINESS_PROMPTS = {
     "default": (
         "You are James, a Senior Client Success Manager. "
@@ -139,7 +139,7 @@ async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default"), 
     except WebSocketDisconnect:
         pass
 
-# 7. FRONTEND (INTERRUPTION LOGIC ADDED)
+# 7. FRONTEND (WITH INTERRUPTION SHIELD)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -208,11 +208,6 @@ async def serve_ui():
             width: 100%; height: 100%;
         }
         .speaking .ring-pulse { animation: ripple 1.5s infinite linear; }
-
-        @keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
-        @keyframes pulse-fast { 0% { opacity: 0.8; } 50% { opacity: 1; } 100% { opacity: 0.8; } }
-        @keyframes ripple { 0% { width: 140px; height: 140px; opacity: 0.5; } 100% { width: 300px; height: 300px; opacity: 0; } }
-        @keyframes spin { 100% { transform: rotate(360deg); } }
         
         .suggestion-btn {
             background: rgba(255,255,255,0.1);
@@ -249,6 +244,7 @@ async def serve_ui():
             // --- STATE CONTROL ---
             const shouldListen = React.useRef(false); 
             const isProcessingAudio = React.useRef(false);
+            const aiStartTime = React.useRef(0); // Tracks when AI started speaking
             const clientId = React.useRef(Math.random().toString(36).substring(7)).current;
 
             React.useEffect(() => {
@@ -286,37 +282,50 @@ async def serve_ui():
                 recognition.current.interimResults = true;
                 
                 recognition.current.onend = () => {
-                    // Always restart recognition if we are in a session
-                    // Even if AI is speaking, we want to listen for interruptions
                     if (shouldListen.current) {
                         try { recognition.current.start(); } catch(e) {}
                     }
                 };
 
                 recognition.current.onresult = (event) => {
+                    // --- INTELLIGENT INTERRUPTION LOGIC ---
                     
-                    // --- 1. USER INTERRUPTS AI ---
-                    // If AI is speaking and we detect input, SHUT THE AI UP
-                    if (isProcessingAudio.current) {
-                         console.log("Interruption Detected!");
-                         synth.cancel(); // Stop talking
-                         audioQueue.current = []; // Clear queue
-                         isProcessingAudio.current = false;
-                         setState("listening");
-                    }
-
-                    // --- 2. CAPTURE INPUT ---
+                    let interim = "";
                     let finalTranscript = "";
+
                     for (let i = event.resultIndex; i < event.results.length; ++i) {
                         if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
+                        else interim += event.results[i][0].transcript;
                     }
 
+                    const detectedText = finalTranscript || interim;
+
+                    // 1. GHOST INPUT FILTER:
+                    // If the text is very short (noise/breath), ignore it completely.
+                    if (detectedText.trim().length < 2) return;
+
+                    // 2. SELF-INTERRUPTION SHIELD:
+                    // If AI is speaking, ONLY interrupt if it's been speaking for > 1.5 seconds.
+                    // This ignores the echo of the AI's own voice at the start.
+                    if (isProcessingAudio.current) {
+                        const timeSinceStart = Date.now() - aiStartTime.current;
+                        if (timeSinceStart < 1500) {
+                            // IGNORE INPUT (Likely Echo)
+                            return; 
+                        }
+
+                        // If we passed the shield, and text is significant, STOP AI.
+                        console.log("Valid Interruption detected.");
+                        synth.cancel(); 
+                        audioQueue.current = [];
+                        isProcessingAudio.current = false;
+                        setState("listening");
+                    }
+
+                    // 3. PROCESS USER INPUT
                     if (finalTranscript.length > 0) {
                         setTranscript(finalTranscript);
                         
-                        // --- 3. PATIENCE LOGIC ---
-                        // Reset timer on every word. 
-                        // Wait 2.5s silence before replying.
                         if (silenceTimer.current) clearTimeout(silenceTimer.current);
                         silenceTimer.current = setTimeout(() => {
                             sendToAi(finalTranscript);
@@ -326,11 +335,7 @@ async def serve_ui():
             };
 
             const sendToAi = (text) => {
-                // When we decide to send to AI, we temporarily stop recognition
-                // to avoid picking up the AI's own voice (if no headphones)
-                // But we restart it immediately after sending.
                 recognition.current.stop(); 
-                
                 setState("thinking");
                 setSuggestions([]); 
                 ws.current.send(text);
@@ -357,6 +362,7 @@ async def serve_ui():
                 }
 
                 isProcessingAudio.current = true;
+                aiStartTime.current = Date.now(); // MARK START TIME
                 setState("speaking");
                 
                 const txt = audioQueue.current.shift();
@@ -369,7 +375,6 @@ async def serve_ui():
                 if(v) utter.voice = v;
                 utter.rate = 1.0; 
                 utter.onend = () => { 
-                    // Only continue if not interrupted
                     if (isProcessingAudio.current) playNextSentence(); 
                 };
                 synth.speak(utter);
