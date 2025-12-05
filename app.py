@@ -4,7 +4,7 @@ import asyncio
 import sys
 import httpx
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -15,12 +15,58 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Founder AI (Always On)", version="15.0.0")
+app = FastAPI(title="Founder AI (Multi-Business)", version="16.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# 3. MEMORY
+# --- 3. BUSINESS KNOWLEDGE BASE (EDIT THIS AREA) ---
+# This is where you define the "Brain" for each of your businesses.
+BUSINESS_PROMPTS = {
+    "default": (
+        "You are Alex, a generic Sales Assistant. "
+        "Goal: Ask the user what business they run. "
+        "Keep answers short."
+    ),
+    
+    "real_estate": (
+        "You are Sarah, a Luxury Real Estate Agent for 'Skyline Properties'. "
+        "GOAL: Qualify the buyer and book a property viewing. "
+        "CONTEXT: We sell condos in Downtown ($500k+) and Villas ($2M+). "
+        "BEHAVIOR: "
+        "1. Ask if they are looking for investment or a home to live in. "
+        "2. Ask for their budget range. "
+        "3. If they seem serious, ask 'When are you available for a viewing?' "
+        "4. DETECT LANGUAGE and reply in that language (add [EN], [ES], etc). "
+        "5. Keep answers under 20 words. Always end with a question."
+    ),
+
+    "dentist": (
+        "You are the Front Desk Coordinator for 'Bright Smile Dental'. "
+        "GOAL: Book a patient for a checkup or cleaning. "
+        "CONTEXT: Cleaning is $99. Whitening is $199. We are open Mon-Sat. "
+        "BEHAVIOR: "
+        "1. Ask if they are in pain or just need a checkup. "
+        "2. Be empathetic and gentle. "
+        "3. If they ask about price, tell them, then ask 'Does 10 AM tomorrow work?' "
+        "4. DETECT LANGUAGE and reply in that language. "
+        "5. Keep answers under 20 words."
+    ),
+
+    "marketing": (
+        "You are Mike, the Growth Director at 'ScaleUp Agency'. "
+        "GOAL: Book a Strategy Call with a business owner. "
+        "CONTEXT: We help e-commerce brands scale using Facebook Ads. Min budget $2k/mo. "
+        "BEHAVIOR: "
+        "1. Ask what their current monthly revenue is. "
+        "2. Ask if they are currently running ads. "
+        "3. If qualified, say 'I have an idea for you. Can we chat for 10 mins?' "
+        "4. DETECT LANGUAGE and reply in that language. "
+        "5. Keep answers under 20 words."
+    )
+}
+
+# 4. MEMORY
 local_memory = {}
 
 async def get_chat_history(session_id: str):
@@ -36,20 +82,23 @@ async def update_chat_history(session_id: str, new_messages: list):
         history = [system_msg] + recent_history
     local_memory[session_id] = history
 
-# 4. STREAMING LOGIC
-async def stream_conversation(session_id: str, user_text: str, websocket: WebSocket):
-    system_prompt = (
-        "You are an elite Sales Closer. "
-        "Goal: Book a meeting. "
-        "Rules: "
-        "1. DETECT language. REPLY IN SAME LANGUAGE. "
-        "2. Start response with language tag like [EN], [ES], [FR]. "
-        "3. Keep answer under 20 words. End with a question."
-    )
+# 5. STREAMING LOGIC
+async def stream_conversation(session_id: str, user_text: str, websocket: WebSocket, business_id: str):
+    
+    # LOAD THE CORRECT BUSINESS PROMPT
+    # If business_id doesn't exist, use 'default'
+    system_prompt_text = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["default"])
     
     history = await get_chat_history(session_id)
-    if not history: history = [{"role": "system", "content": system_prompt}]
     
+    # Inject the specific prompt if history is empty
+    if not history: 
+        history = [{"role": "system", "content": system_prompt_text}]
+    else:
+        # If switching businesses mid-stream, update the system prompt (Optional advanced feature)
+        # For now, we assume one session = one business
+        pass
+
     messages_to_send = history + [{"role": "user", "content": user_text}]
     full_response = ""
     
@@ -84,26 +133,31 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
         await websocket.send_json({"type": "end", "full_text": full_response})
 
     except Exception:
-        err = "[EN] I lost connection."
+        err = "[EN] Connection error."
         await websocket.send_json({"type": "chunk", "content": err})
         await websocket.send_json({"type": "end", "full_text": err})
 
-# 5. WEBSOCKET
+# 6. WEBSOCKET HANDLER (Accepts ?biz=dentist)
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default")):
     await websocket.accept()
     session_id = str(id(websocket))
+    print(f"🔗 Client Connected to Business: {biz}")
+    
     try:
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
+            
             await websocket.send_json({"type": "status", "content": "Thinking..."})
-            await stream_conversation(session_id, data, websocket)
+            # Pass the 'biz' ID to the streaming function
+            await stream_conversation(session_id, data, websocket, biz)
             await websocket.send_json({"type": "status", "content": "Listening..."})
+            
     except WebSocketDisconnect:
         if session_id in local_memory: del local_memory[session_id]
 
-# 6. FRONTEND (INFINITE LISTENING FIX)
+# 7. FRONTEND (BUSINESS SELECTOR)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -111,7 +165,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Founder AI (Always On)</title>
+    <title>Multi-Business AI</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -149,22 +203,27 @@ async def serve_ui():
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
             
+            // BUSINESS SELECTION STATE
+            const [selectedBiz, setSelectedBiz] = React.useState("real_estate");
+
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
             const isConversationActive = React.useRef(false);
 
-            React.useEffect(() => {
-                const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-                ws.current = new WebSocket(protocol + window.location.host + "/ws");
+            // Connect to WebSocket with Business Param
+            const connectWebSocket = (bizId) => {
+                if(ws.current) ws.current.close();
                 
-                ws.current.onopen = () => setStatus("Connected");
+                const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+                // PASSING THE BUSINESS ID HERE
+                ws.current = new WebSocket(protocol + window.location.host + "/ws?biz=" + bizId);
+                
+                ws.current.onopen = () => setStatus("Connected: " + bizId.toUpperCase());
                 ws.current.onclose = () => setStatus("Disconnected");
                 
                 ws.current.onmessage = (e) => {
                     const data = JSON.parse(e.data);
-                    
                     if (data.type === "status") {
-                        // Only change state if we are not speaking to avoid interruption
                         if(aiState !== "speaking") setAiState("thinking");
                         if(data.content === "Thinking...") setResponse("");
                     }
@@ -175,49 +234,35 @@ async def serve_ui():
                         speakResponse(data.full_text);
                     }
                 };
+            };
 
-                // --- INFINITE LISTENER LOGIC ---
+            // Re-connect when dropdown changes
+            React.useEffect(() => {
+                connectWebSocket(selectedBiz);
+                return () => { if(ws.current) ws.current.close(); };
+            }, [selectedBiz]);
+
+            // Init Speech
+            React.useEffect(() => {
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
-                    recognition.current.continuous = false; // Must be false for instant results
+                    recognition.current.continuous = false; 
                     
-                    // START
-                    recognition.current.onstart = () => {
-                        if (isConversationActive.current) setAiState("listening");
-                    };
-
-                    // END - THE CRITICAL FIX
+                    recognition.current.onstart = () => { if (isConversationActive.current) setAiState("listening"); };
+                    
+                    // INFINITE LOOP LOGIC
                     recognition.current.onend = () => {
-                        // If user clicked stop, do nothing.
-                        if (!isConversationActive.current) {
-                            setAiState("idle");
-                            return;
-                        }
-
-                        // If AI is speaking, DO NOT restart yet (wait for speech to finish)
-                        if (aiState === "speaking") {
-                            return;
-                        }
-
-                        // If AI is NOT speaking, RESTART IMMEDIATELY
-                        // This handles the "silence timeout"
-                        console.log("Silence detected. Restarting listener...");
+                        if (!isConversationActive.current) { setAiState("idle"); return; }
+                        if (aiState === "speaking") return;
                         try { recognition.current.start(); } catch(e) {}
                     };
 
-                    // RESULT
                     recognition.current.onresult = (event) => {
                         const text = event.results[0][0].transcript;
                         setTranscript(text);
                         setAiState("thinking");
                         ws.current.send(text);
-                    };
-
-                    // ERROR
-                    recognition.current.onerror = (event) => {
-                        console.log("Speech Error:", event.error);
-                        // If 'no-speech' error (silence), ignore it. onend will restart it.
                     };
                 }
             }, [aiState]);
@@ -226,7 +271,6 @@ async def serve_ui():
                 setAiState("speaking");
                 window.speechSynthesis.cancel();
                 
-                // Multi-Lang Logic
                 let langCode = 'en';
                 let textToSpeak = fullText;
                 const tagMatch = fullText.match(/^\[([A-Z]{2})\]/);
@@ -237,25 +281,19 @@ async def serve_ui():
 
                 const utterance = new SpeechSynthesisUtterance(textToSpeak);
                 window.currentUtterance = utterance; 
-
                 const voices = window.speechSynthesis.getVoices();
                 let selectedVoice = voices.find(v => v.lang.startsWith(langCode) && v.name.includes("Google"));
                 if (!selectedVoice) selectedVoice = voices.find(v => v.lang.startsWith(langCode));
-                if (selectedVoice) {
-                    utterance.voice = selectedVoice;
-                    utterance.rate = langCode === 'es' ? 0.9 : 1.0; 
-                }
+                if (selectedVoice) utterance.voice = selectedVoice;
 
                 utterance.onend = () => {
                     if (isConversationActive.current) {
                         setAiState("listening");
-                        // FORCE RESTART LISTENER AFTER SPEAKING
                         try { recognition.current.start(); } catch(e) {}
                     } else {
                         setAiState("idle");
                     }
                 };
-                
                 window.speechSynthesis.speak(utterance);
             };
 
@@ -277,9 +315,27 @@ async def serve_ui():
 
             return (
                 <div className="flex flex-col items-center w-full px-4">
-                    <div className="mb-10 text-center">
-                        <h1 className="text-3xl font-bold tracking-[0.2em] text-sky-400 drop-shadow-lg">FOUNDER AGENT</h1>
+                    <div className="mb-6 text-center w-full">
+                        <h1 className="text-3xl font-bold tracking-[0.2em] text-sky-400 drop-shadow-lg">BUSINESS AI</h1>
                         <p className="text-gray-600 text-[10px] mt-2 uppercase">{status}</p>
+
+                        {/* BUSINESS SELECTOR DROPDOWN */}
+                        <div className="mt-4">
+                            <label className="text-xs text-gray-400 mr-2">SELECT BUSINESS:</label>
+                            <select 
+                                value={selectedBiz} 
+                                onChange={(e) => {
+                                    setResponse("");
+                                    setTranscript("");
+                                    setSelectedBiz(e.target.value);
+                                }}
+                                className="bg-slate-800 text-white text-xs p-2 rounded border border-slate-600 outline-none"
+                            >
+                                <option value="real_estate">Real Estate Agent</option>
+                                <option value="dentist">Dental Clinic</option>
+                                <option value="marketing">Marketing Agency</option>
+                            </select>
+                        </div>
                     </div>
 
                     <div className={`orb-container ${aiState}`} onClick={toggle}>
