@@ -13,13 +13,14 @@ from dotenv import load_dotenv
 
 # 1. CONFIGURATION
 load_dotenv()
+# Force 127.0.0.1 to avoid localhost lookup issues
 OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 
 # 2. APP SETUP
-app = FastAPI(title="Founder Sales AI (Final)", version="9.0.0")
+app = FastAPI(title="Founder Sales AI (Audio Fix)", version="10.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
@@ -31,9 +32,11 @@ class Infrastructure:
         self.redis = None
 
     async def connect(self):
+        # We wrap these in try/except so the app works even if DB/Redis fails
         try:
             if REDIS_URL:
                 self.redis = redis.from_url(REDIS_URL, decode_responses=True)
+                await self.redis.ping()
         except: pass
         try:
             if DATABASE_URL:
@@ -48,25 +51,25 @@ infra = Infrastructure()
 
 @app.on_event("startup")
 async def startup():
+    print("🚀 SERVER STARTED")
     await infra.connect()
 
 @app.on_event("shutdown")
 async def shutdown():
     await infra.disconnect()
 
-# 4. SALES LOGIC (STRICT CLOSER)
+# 4. SALES LOGIC
 async def process_conversation(session_id: str, user_text: str):
     history_key = f"founder_chat:{session_id}"
     messages = []
     
-    # --- STRICT CLOSER PROMPT ---
+    # --- PROMPT: SHORT & DIRECT ---
     system_prompt = (
-        "You are Alex, a high-stakes Sales Closer. You are busy and professional."
-        "RULES:"
-        "1. Your goal is to BOOK A MEETING."
-        "2. Responses must be under 20 words. No long paragraphs."
-        "3. Always end with a question to control the frame."
-        "4. If asked 'how are you', say 'Focused on growth. How can I help you scale?'"
+        "You are Alex, a professional Sales Closer. "
+        "Your goal: Book a meeting."
+        "Rule 1: Response must be UNDER 15 WORDS."
+        "Rule 2: End with a question."
+        "Rule 3: No lists, no robot talk."
     )
 
     if infra.redis:
@@ -82,32 +85,34 @@ async def process_conversation(session_id: str, user_text: str):
     
     ai_response = ""
 
+    print(f"🎤 User: {user_text}")
+
     # CALL OLLAMA
     try:
         async with httpx.AsyncClient() as client:
+            # 30s Timeout
             response = await client.post(
                 f"{OLLAMA_URL}/api/chat",
                 json={
                     "model": AI_MODEL, 
                     "messages": messages, 
                     "stream": False,
-                    "options": {
-                        "temperature": 0.6, 
-                        "num_predict": 40 # Limit generation size
-                    }
+                    "options": {"temperature": 0.6, "num_predict": 40}
                 },
-                timeout=40.0 
+                timeout=30.0 
             )
             
             if response.status_code == 200:
                 data = response.json()
                 if 'message' in data:
                     ai_response = data['message']['content']
+                print(f"🤖 AI: {ai_response}")
             else:
-                ai_response = "I'm having a connection issue."
+                ai_response = "I am having trouble thinking right now."
 
-    except Exception:
-        ai_response = "I couldn't hear that properly."
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        ai_response = "I couldn't hear you."
 
     # Update History
     messages.append({"role": "assistant", "content": ai_response})
@@ -126,6 +131,7 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             
+            # Heartbeat to keep connection open
             if data == "__PING__":
                 await websocket.send_text("__PONG__")
                 continue
@@ -137,8 +143,10 @@ async def websocket_endpoint(websocket: WebSocket):
             
     except WebSocketDisconnect:
         pass
+    except Exception as e:
+        print(f"WS Error: {e}")
 
-# 6. FRONTEND (BEAUTIFUL UI RESTORED)
+# 6. FRONTEND (AUDIO DEBUGGER)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -146,7 +154,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>AI Sales Closer</title>
+    <title>Founder AI (Audio Fix)</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -185,6 +193,7 @@ async def serve_ui():
             const [mode, setMode] = React.useState("idle");
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
+            const [audioStatus, setAudioStatus] = React.useState("Audio Ready");
             
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
@@ -211,9 +220,7 @@ async def serve_ui():
                     speakResponse(text);
                 };
 
-                // PRELOAD VOICES
-                window.speechSynthesis.getVoices();
-
+                // Initialize Speech Recognition
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
@@ -246,33 +253,40 @@ async def serve_ui():
                 };
             }, [mode]);
 
+            // --- TEST BUTTON FUNCTION ---
+            const testAudio = () => {
+                const u = new SpeechSynthesisUtterance("Audio system check. One, two, three.");
+                window.speechSynthesis.speak(u);
+                setAudioStatus("Testing Audio...");
+                u.onend = () => setAudioStatus("Audio OK");
+            };
+
             const speakResponse = (text) => {
                 setMode("speaking");
-                window.speechSynthesis.cancel();
+                setAudioStatus("Playing Audio...");
+                
+                window.speechSynthesis.cancel(); // Stop anything playing
                 
                 const utterance = new SpeechSynthesisUtterance(text);
-                window.currentUtterance = utterance; // Keep alive
+                
+                // CRITICAL FIX: Attach to window to prevent Garbage Collection
+                window.currentUtterance = utterance;
 
-                let voices = window.speechSynthesis.getVoices();
-                const setVoice = () => {
-                    utterance.voice = voices.find(v => v.name === "Google US English") || 
-                                      voices.find(v => v.name.includes("Zira")) || voices[0];
-                };
-
-                if (!voices.length) {
-                    window.speechSynthesis.onvoiceschanged = () => {
-                        voices = window.speechSynthesis.getVoices();
-                        setVoice();
-                        window.speechSynthesis.speak(utterance);
-                    };
-                } else {
-                    setVoice();
-                    window.speechSynthesis.speak(utterance);
-                }
+                // Robust Voice Selection
+                const voices = window.speechSynthesis.getVoices();
+                // 1. Try Google US
+                let selectedVoice = voices.find(v => v.name === "Google US English");
+                // 2. Try any English
+                if (!selectedVoice) selectedVoice = voices.find(v => v.lang.startsWith("en"));
+                // 3. Fallback to default
+                if (!selectedVoice && voices.length > 0) selectedVoice = voices[0];
+                
+                if (selectedVoice) utterance.voice = selectedVoice;
 
                 utterance.rate = 1.0;
                 
                 utterance.onend = () => {
+                    setAudioStatus("Audio Finished");
                     if (isConversationActive.current) {
                         setMode("listening");
                         try { recognition.current.start(); } catch(e) {}
@@ -280,6 +294,15 @@ async def serve_ui():
                         setMode("idle");
                     }
                 };
+
+                utterance.onerror = (e) => {
+                    setAudioStatus("Audio Error!");
+                    console.error(e);
+                    // If audio fails, don't freeze the app. Go back to listening.
+                    if (isConversationActive.current) setMode("listening");
+                };
+
+                window.speechSynthesis.speak(utterance);
             };
 
             const toggleConversation = () => {
@@ -299,22 +322,31 @@ async def serve_ui():
 
             return (
                 <div className="flex flex-col items-center">
-                    <div className="mb-12 text-center">
+                    <div className="mb-8 text-center">
                         <h1 className="text-4xl font-bold glow-text tracking-widest text-sky-400">FOUNDER AI</h1>
                         <p className="text-gray-500 text-sm mt-3 uppercase tracking-widest font-semibold">{status}</p>
+                        
+                        {/* DEBUG BUTTON */}
+                        <button onClick={testAudio} className="mt-2 bg-slate-800 hover:bg-slate-700 text-xs text-white px-3 py-1 rounded border border-slate-600">
+                            🔊 Test Audio
+                        </button>
+                        <p className="text-xs text-sky-300 mt-1">{audioStatus}</p>
                     </div>
+
                     <div className={`orb-container ${mode}`} onClick={toggleConversation}>
                         <i className={`fas fa-${
                             mode === 'listening' ? 'microphone' : mode === 'speaking' ? 'comments' : 
                             mode === 'processing' ? 'sync' : 'power-off'
                         } text-5xl text-white`}></i>
                     </div>
+
                     <div className="mt-8 text-center h-8">
                         {mode === 'listening' && <span className="text-red-400 animate-pulse font-mono">LISTENING...</span>}
                         {mode === 'speaking' && <span className="text-green-400 animate-pulse font-mono">FOUNDER SPEAKING...</span>}
                         {mode === 'processing' && <span className="text-amber-400 animate-pulse font-mono">PROCESSING...</span>}
                         {mode === 'idle' && <span className="text-gray-600 font-mono">TAP TO START CALL</span>}
                     </div>
+
                     <div className="w-full max-w-md mt-8 p-6 bg-slate-900 bg-opacity-90 rounded-xl border border-slate-800 min-h-[150px] flex flex-col justify-end shadow-2xl">
                         {transcript && <div className="self-end bg-slate-800 text-sky-100 px-4 py-2 rounded-2xl rounded-tr-none mb-3 max-w-[85%] text-sm shadow-md">{transcript}</div>}
                         {response && <div className="self-start text-white font-medium text-lg leading-relaxed">{response}</div>}
