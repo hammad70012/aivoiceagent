@@ -16,40 +16,35 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Professional AI Sales", version="21.0.0")
+app = FastAPI(title="Polite Professional AI", version="22.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- 3. PROFESSIONAL KNOWLEDGE BASE ---
-# These prompts are engineered for "Consultative Selling" (High Trust).
+# --- 3. POLITE & DISCIPLINED KNOWLEDGE BASE ---
 BUSINESS_PROMPTS = {
-    "consultant": (
-        "You are James, a Senior Business Consultant. "
-        "TONE: Professional, articulate, calm, and authoritative. "
-        "GOAL: Uncover the client's specific needs through active listening. "
+    "default": (
+        "You are James, a Senior Client Success Manager. "
+        "BEHAVIOR: Extremely polite, patient, and respectful. "
         "RULES: "
-        "1. Speak in full, clear sentences. "
-        "2. Do not ramble. Keep responses under 40 words. "
-        "3. Always acknowledge what the user said before pivoting. "
-        "4. End every turn with a relevant, open-ended question to guide the conversation. "
-        "5. Do NOT use bullet points. Speak naturally."
-        "OPENER: 'Hello, this is James. I understand you're looking for some strategic guidance. Could you briefly outline your main challenge?'"
+        "1. NEVER interrupt. Acknowledge what the user said first (e.g., 'I understand,' 'That makes perfect sense'). "
+        "2. Speak clearly and calmly. "
+        "3. Keep responses concise (2-3 sentences) to respect the client's time. "
+        "4. Ask permission before moving to the next step (e.g., 'May I ask a few details about...?'). "
+        "OPENER: 'Hello, this is James. Thank you for connecting. How may I assist you today?'"
     ),
-    "luxury_real_estate": (
-        "You are Victoria, a Luxury Real Estate Partner. "
-        "TONE: Sophisticated, warm, and polished. "
-        "GOAL: Qualify the buyer for a private viewing. "
-        "RULES: "
-        "1. Use elegant language but keep it conversational. "
-        "2. Focus on lifestyle and value, not just price. "
-        "3. If asked about price, ask about their comfort range instead. "
-        "4. Keep it concise. "
-        "OPENER: 'Good morning, this is Victoria. I specialize in high-end properties. Are you looking for a primary residence or an investment portfolio addition?'"
+    "luxury_sales": (
+        "You are Elizabeth, a Senior Consultant for Premium Accounts. "
+        "BEHAVIOR: You offer 'White Glove' service. calm, unhurried, and attentive. "
+        "STRATEGY: "
+        "1. Active Listening: Repeat back the key concern to show you understood. "
+        "2. Discipline: Do not push for a sale. Push for understanding. "
+        "3. Tone: Soft, professional, warm. "
+        "OPENER: 'Good day, this is Elizabeth. I am here to help. To ensure I give you the best advice, could you tell me a little about your current situation?'"
     )
 }
 
-# 4. MEMORY MANAGEMENT
+# 4. MEMORY
 local_memory = {}
 
 async def get_chat_history(session_id: str):
@@ -59,20 +54,19 @@ async def get_chat_history(session_id: str):
 async def update_chat_history(session_id: str, new_messages: list):
     history = await get_chat_history(session_id)
     history.extend(new_messages)
-    # Context window: Keep System + Last 10 turns
-    if len(history) > 11: 
+    if len(history) > 12: 
         history = [history[0]] + history[-10:]
     local_memory[session_id] = history
 
-# 5. SEAMLESS STREAMING LOGIC
+# 5. LOGIC FOR DISCIPLINED RESPONSE
 async def stream_conversation(session_id: str, user_text: str, websocket: WebSocket, business_id: str):
-    base_prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["consultant"])
+    base_prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["default"])
     
     system_instruction = (
         f"{base_prompt} "
-        "IMPORTANT: You are conversing via voice. "
-        "Write naturally as if speaking. "
-        "Avoid special characters like asterisks or dashes."
+        "IMPORTANT: Write for Text-to-Speech. "
+        "Use full punctuation. No bullet points. "
+        "Be polite."
     )
 
     history = await get_chat_history(session_id)
@@ -81,8 +75,6 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
 
     messages = history + [{"role": "user", "content": user_text}]
     full_resp = ""
-    
-    # Buffer to hold words until we form a complete sentence
     sentence_buffer = ""
     
     try:
@@ -95,9 +87,8 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                     "messages": messages, 
                     "stream": True,
                     "options": {
-                        "temperature": 0.7, # Lower temp = More focused/professional
-                        "num_predict": 100,
-                        "top_p": 0.9
+                        "temperature": 0.6, # Lower temp for consistent, polite behavior
+                        "num_predict": 100
                     }
                 },
                 timeout=45.0
@@ -111,20 +102,18 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                             full_resp += word
                             sentence_buffer += word
                             
-                            # CRITICAL FIX: Only send when we have a COMPLETE sentence.
-                            # This prevents the "choppy" start/stop effect.
+                            # Only send when a FULL sentence is complete to ensure correct intonation.
                             if re.search(r'[.!?:]\s*$', sentence_buffer):
-                                # Send the clean sentence
                                 await websocket.send_json({
                                     "type": "audio_sentence", 
                                     "content": sentence_buffer.strip()
                                 })
-                                sentence_buffer = "" # Reset buffer for next sentence
+                                sentence_buffer = "" 
                         
                         if chunk.get("done", False): break
                     except: pass
         
-        # If there is any leftover text (e.g. no punctuation at very end), send it.
+        # Send any remaining polite closing
         if sentence_buffer.strip():
             await websocket.send_json({"type": "audio_sentence", "content": sentence_buffer.strip()})
 
@@ -133,17 +122,16 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
             {"role": "assistant", "content": full_resp}
         ])
         
-        # Signal that the AI is fully done thinking
+        # Signal that the turn is complete
         await websocket.send_json({"type": "turn_complete"})
 
     except Exception as e:
-        print(f"Error: {e}")
-        err = "I apologize, the connection was interrupted. Could you repeat that?"
+        err = "I apologize, I didn't quite catch that. Could you please repeat it?"
         await websocket.send_json({"type": "audio_sentence", "content": err})
 
 # 6. WEBSOCKET ROUTE
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, biz: str = Query("consultant")):
+async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default")):
     await websocket.accept()
     session_id = str(id(websocket))
     try:
@@ -154,7 +142,7 @@ async def websocket_endpoint(websocket: WebSocket, biz: str = Query("consultant"
     except WebSocketDisconnect:
         if session_id in local_memory: del local_memory[session_id]
 
-# 7. PROFESSIONAL UI
+# 7. PROFESSIONAL FRONTEND
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -162,256 +150,210 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Professional AI Agent</title>
+    <title>Professional Consultant</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
-        body { background-color: #f8fafc; color: #1e293b; font-family: 'Inter', sans-serif; }
+        body { background: #f3f4f6; color: #1f2937; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
         
-        /* Professional Card */
-        .card {
+        .interface-container {
             background: white;
-            box-shadow: 0 10px 40px -10px rgba(0,0,0,0.1);
-            border-radius: 24px;
+            width: 100%; max-width: 500px;
+            border-radius: 20px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.1);
             overflow: hidden;
-            width: 100%;
-            max-width: 450px;
-            border: 1px solid #e2e8f0;
+            display: flex; flex-direction: column;
+            align-items: center;
+            padding: 40px 20px;
+            border: 1px solid #e5e7eb;
         }
 
-        .status-dot {
-            height: 8px; width: 8px; border-radius: 50%;
-            display: inline-block; margin-right: 6px;
-        }
-        .status-dot.active { background-color: #22c55e; box-shadow: 0 0 10px #22c55e; }
-        .status-dot.thinking { background-color: #f59e0b; animation: pulse 1s infinite; }
-        .status-dot.offline { background-color: #ef4444; }
-
-        @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
-        
-        .mic-btn {
-            background: #0f172a; color: white;
-            width: 70px; height: 70px;
+        .avatar-circle {
+            width: 100px; height: 100px;
             border-radius: 50%;
+            background: #e0f2fe;
             display: flex; align-items: center; justify-content: center;
-            font-size: 24px;
-            transition: all 0.3s ease;
-            cursor: pointer;
-            box-shadow: 0 10px 25px rgba(15, 23, 42, 0.2);
+            margin-bottom: 20px;
+            position: relative;
         }
-        .mic-btn:hover { transform: scale(1.05); background: #1e293b; }
-        .mic-btn.listening { background: #ef4444; animation: breathe 2s infinite; }
-        .mic-btn.disabled { opacity: 0.5; cursor: not-allowed; }
 
-        @keyframes breathe { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); } 70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
+        .avatar-circle.speaking {
+            border: 3px solid #0ea5e9;
+            animation: pulse-blue 2s infinite;
+        }
+        
+        .avatar-circle.listening {
+            border: 3px solid #10b981;
+        }
 
-        .wave-container { height: 40px; display: flex; align-items: center; justify-content: center; gap: 3px; }
-        .wave-bar { width: 4px; height: 100%; background: #3b82f6; border-radius: 10px; animation: wave 1s infinite ease-in-out; }
-        .wave-bar:nth-child(2) { animation-delay: 0.1s; }
-        .wave-bar:nth-child(3) { animation-delay: 0.2s; }
-        .wave-bar:nth-child(4) { animation-delay: 0.3s; }
-        .wave-bar:nth-child(5) { animation-delay: 0.4s; }
-        @keyframes wave { 0%, 100% { height: 20%; opacity: 0.5; } 50% { height: 100%; opacity: 1; } }
+        @keyframes pulse-blue { 0% { box-shadow: 0 0 0 0 rgba(14, 165, 233, 0.4); } 70% { box-shadow: 0 0 0 20px rgba(14, 165, 233, 0); } 100% { box-shadow: 0 0 0 0 rgba(14, 165, 233, 0); } }
+
+        .status-text { font-size: 14px; letter-spacing: 1px; color: #9ca3af; text-transform: uppercase; margin-top: 10px; font-weight: 600; }
+        
+        .transcript-box {
+            margin-top: 30px; min-height: 80px; width: 100%;
+            text-align: center; font-size: 18px; color: #374151;
+            line-height: 1.6;
+        }
     </style>
 </head>
-<body class="h-screen flex items-center justify-center p-4">
+<body class="h-screen flex items-center justify-center">
     <div id="root"></div>
 
     <script type="text/babel">
         function App() {
-            const [state, setState] = React.useState("idle"); // idle, listening, thinking, speaking
-            const [transcript, setTranscript] = React.useState("Click microphone to start");
-            const [role, setRole] = React.useState("consultant");
-            
+            // States: 'idle', 'listening', 'thinking', 'speaking'
+            const [state, setState] = React.useState("idle"); 
+            const [textDisplay, setTextDisplay] = React.useState("Tap the microphone to begin.");
+            const [role, setRole] = React.useState("luxury_sales");
+
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
             const synth = window.speechSynthesis;
             const audioQueue = React.useRef([]);
-            const isSpeaking = React.useRef(false);
             const silenceTimer = React.useRef(null);
+            const isProcessingAudio = React.useRef(false);
 
+            // --- 1. INITIALIZATION ---
             React.useEffect(() => {
-                // Initialize WebSocket
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
                 ws.current = new WebSocket(`${protocol}${window.location.host}/ws?biz=${role}`);
                 
                 ws.current.onmessage = (event) => {
                     const data = JSON.parse(event.data);
-                    
                     if (data.type === "audio_sentence") {
-                        // Backend sent a COMPLETE sentence. Add to queue.
-                        addToAudioQueue(data.content);
-                    } 
-                    else if (data.type === "turn_complete") {
-                        // AI is done thinking.
-                        // We rely on the queue to finish playing.
+                        queueAudio(data.content);
                     }
                 };
 
-                return () => { if (ws.current) ws.current.close(); };
+                setupRecognition();
+
+                return () => { if(ws.current) ws.current.close(); };
             }, [role]);
 
-            React.useEffect(() => {
-                // Initialize Speech Recognition
-                if (window.SpeechRecognition || window.webkitSpeechRecognition) {
-                    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-                    recognition.current = new SpeechRecognition();
-                    recognition.current.continuous = true;
-                    recognition.current.interimResults = true;
-                    
-                    recognition.current.onstart = () => {
-                        if (state !== 'speaking') setState("listening");
-                    };
+            // --- 2. MICROPHONE LOGIC (The Disciplined Listener) ---
+            const setupRecognition = () => {
+                if (!window.SpeechRecognition && !window.webkitSpeechRecognition) return;
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                recognition.current = new SpeechRecognition();
+                recognition.current.continuous = true; 
+                recognition.current.interimResults = true;
+                
+                recognition.current.onresult = (event) => {
+                    // IF THE AI IS SPEAKING, WE IGNORE INPUT.
+                    // This prevents interruption.
+                    if (isProcessingAudio.current) return;
 
-                    recognition.current.onresult = (event) => {
-                        // Interrupt AI if user speaks
-                        if (isSpeaking.current) {
-                            synth.cancel();
-                            audioQueue.current = [];
-                            isSpeaking.current = false;
-                        }
+                    let finalTranscript = "";
+                    for (let i = event.resultIndex; i < event.results.length; ++i) {
+                        if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
+                    }
 
-                        let interim = "";
-                        let final = "";
+                    if (finalTranscript.length > 0) {
+                        setTextDisplay('"' + finalTranscript + '"');
                         
-                        for (let i = event.resultIndex; i < event.results.length; ++i) {
-                            if (event.results[i].isFinal) final += event.results[i][0].transcript;
-                            else interim += event.results[i][0].transcript;
-                        }
-
-                        const currentText = final || interim;
-                        setTranscript(currentText);
-
-                        // Professional Pause Detection (1.2s)
+                        // 2.5 SECONDS SILENCE (Polite waiting time)
                         if (silenceTimer.current) clearTimeout(silenceTimer.current);
-                        
-                        if (currentText.trim().length > 0) {
-                             silenceTimer.current = setTimeout(() => {
-                                submitMessage(currentText);
-                            }, 1200); 
-                        }
-                    };
-                }
-            }, [state]);
+                        silenceTimer.current = setTimeout(() => {
+                            sendToAi(finalTranscript);
+                        }, 2500); 
+                    }
+                };
+            };
 
-            const submitMessage = (text) => {
-                recognition.current.stop();
+            const sendToAi = (text) => {
+                recognition.current.stop(); // Strictly stop listening
                 setState("thinking");
                 ws.current.send(text);
             };
 
-            const addToAudioQueue = (text) => {
+            // --- 3. SPEAKER LOGIC (The Professional Voice) ---
+            const queueAudio = (text) => {
                 audioQueue.current.push(text);
-                playQueue();
+                if (!isProcessingAudio.current) {
+                    playNextSentence();
+                }
             };
 
-            const playQueue = () => {
-                if (isSpeaking.current || audioQueue.current.length === 0) return;
+            const playNextSentence = () => {
+                if (audioQueue.current.length === 0) {
+                    // QUEUE FINISHED: Now we politely listen again.
+                    isProcessingAudio.current = false;
+                    setState("listening");
+                    setTextDisplay("Listening...");
+                    try { recognition.current.start(); } catch(e){}
+                    return;
+                }
 
-                isSpeaking.current = true;
+                isProcessingAudio.current = true;
                 setState("speaking");
                 
-                const textToSpeak = audioQueue.current.shift();
-                setTranscript(textToSpeak); // Show what AI is saying
+                const txt = audioQueue.current.shift();
+                setTextDisplay(txt); // Show subtitle
 
-                const utter = new SpeechSynthesisUtterance(textToSpeak);
+                const utter = new SpeechSynthesisUtterance(txt);
                 
-                // --- HIGH QUALITY VOICE SELECTION ---
+                // --- Voice Selection for Professionalism ---
                 const voices = synth.getVoices();
-                // Prefer Google US or Microsoft Online (High Quality)
-                let selectedVoice = voices.find(v => v.name.includes("Google US English"));
-                if (!selectedVoice) selectedVoice = voices.find(v => v.name.includes("Zira")); // Good Windows Voice
-                if (selectedVoice) utter.voice = selectedVoice;
+                let v = voices.find(v => v.name.includes("Google US English"));
+                if(!v) v = voices.find(v => v.name.includes("Zira"));
+                if(v) utter.voice = v;
 
-                utter.rate = 1.05; // Slightly faster than default for professional pacing
-                utter.pitch = 1.0;
-
+                utter.rate = 1.0; // Normal, calm speed
                 utter.onend = () => {
-                    isSpeaking.current = false;
-                    if (audioQueue.current.length > 0) {
-                        playQueue(); // Play next sentence immediately
-                    } else {
-                        // Queue empty, turn over.
-                        setState("idle");
-                        // Automatically start listening again for seamless flow
-                        startListening();
-                    }
+                    playNextSentence(); // Recursive call for smooth flow
                 };
                 
                 synth.speak(utter);
             };
 
-            const startListening = () => {
-                try {
-                    recognition.current.start();
+            const toggleSession = () => {
+                if (state === "idle") {
                     setState("listening");
-                    setTranscript("Listening...");
-                } catch(e) {
-                    // Recognition likely already started
-                }
-            };
-
-            const toggleMic = () => {
-                if (state === "idle" || state === "speaking") {
-                    synth.cancel(); // Stop talking
-                    isSpeaking.current = false;
-                    audioQueue.current = [];
-                    startListening();
+                    setTextDisplay("Listening...");
+                    try { recognition.current.start(); } catch(e){}
                 } else {
-                    recognition.current.stop();
                     setState("idle");
+                    recognition.current.stop();
+                    synth.cancel();
+                    isProcessingAudio.current = false;
+                    setTextDisplay("Session Ended.");
                 }
             };
 
             return (
-                <div className="card p-8 flex flex-col items-center">
-                    <div className="w-full flex justify-between items-center mb-6">
-                        <div className="flex items-center">
-                            <span className={`status-dot ${state === 'listening' ? 'active' : (state === 'thinking' ? 'thinking' : 'active')}`}></span>
-                            <span className="text-sm font-semibold text-slate-500 uppercase tracking-wide">
-                                {state === 'listening' ? 'Online' : state}
-                            </span>
-                        </div>
-                        <select 
-                            value={role} 
-                            onChange={(e) => setRole(e.target.value)}
-                            className="text-xs bg-slate-100 border border-slate-200 rounded-lg px-2 py-1 text-slate-600 outline-none"
+                <div className="interface-container">
+                    <div className={`avatar-circle ${state}`}>
+                        <i className={`fas fa-${state === 'listening' ? 'microphone' : (state === 'speaking' ? 'user-tie' : (state === 'thinking' ? 'circle-notch fa-spin' : 'power-off'))} text-4xl text-slate-500`}></i>
+                    </div>
+
+                    <div className="status-text">{state}</div>
+
+                    <div className="transcript-box">
+                        {textDisplay}
+                    </div>
+
+                    <div className="mt-8 flex gap-4 w-full justify-center">
+                         <button 
+                            onClick={toggleSession}
+                            className={`px-8 py-3 rounded-full font-bold shadow-lg transition-all ${state === 'idle' ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-red-500 text-white hover:bg-red-600'}`}
                         >
-                            <option value="consultant">Business Consultant</option>
-                            <option value="luxury_real_estate">Luxury Real Estate</option>
+                            {state === 'idle' ? 'START CALL' : 'END CALL'}
+                        </button>
+                    </div>
+
+                    <div className="mt-6">
+                        <select 
+                            onChange={(e) => setRole(e.target.value)}
+                            className="bg-slate-100 text-slate-600 text-xs py-2 px-4 rounded-lg outline-none"
+                        >
+                            <option value="luxury_sales">Elizabeth (Luxury Consultant)</option>
+                            <option value="default">James (Success Manager)</option>
                         </select>
                     </div>
-
-                    <div className="h-32 w-full flex items-center justify-center text-center px-4 mb-8">
-                        {state === 'speaking' ? (
-                            <div className="wave-container">
-                                <div className="wave-bar"></div>
-                                <div className="wave-bar"></div>
-                                <div className="wave-bar"></div>
-                                <div className="wave-bar"></div>
-                                <div className="wave-bar"></div>
-                            </div>
-                        ) : (
-                            <p className="text-xl text-slate-800 font-medium leading-relaxed transition-all">
-                                "{transcript}"
-                            </p>
-                        )}
-                    </div>
-
-                    <button 
-                        onClick={toggleMic}
-                        className={`mic-btn ${state === 'listening' ? 'listening' : ''}`}
-                    >
-                        <i className={`fas fa-${state === 'listening' ? 'microphone' : (state === 'speaking' ? 'stop' : 'microphone')}`}></i>
-                    </button>
-                    
-                    <p className="mt-6 text-slate-400 text-xs">
-                        {state === 'thinking' ? 'Processing inquiry...' : 'Tap microphone to speak'}
-                    </p>
                 </div>
             );
         }
