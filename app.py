@@ -15,18 +15,18 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Founder AI (Streaming)", version="11.0.0")
+app = FastAPI(title="Founder Sales AI", version="12.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
 # 3. STREAMING LOGIC
-# This sends text word-by-word so the connection never times out.
 async def stream_conversation(user_text: str, websocket: WebSocket):
+    # --- FOUNDER PERSONA ---
     system_prompt = (
-        "You are a professional Sales Closer. "
+        "You are Alex, a Founder and Sales Closer. "
         "Goal: Book a meeting. "
-        "Keep answers under 20 words. End with a question."
+        "Rules: Keep answers under 20 words. Be direct. End with a question."
     )
     
     messages = [
@@ -44,41 +44,34 @@ async def stream_conversation(user_text: str, websocket: WebSocket):
                 json={
                     "model": AI_MODEL, 
                     "messages": messages, 
-                    "stream": True,  # ENABLE STREAMING
-                    "options": {"temperature": 0.6, "num_predict": 50}
+                    "stream": True,
+                    "options": {"temperature": 0.6, "num_predict": 60}
                 },
-                timeout=60.0 # Longer timeout allowed for streaming
+                timeout=60.0
             ) as response:
                 
                 async for line in response.aiter_lines():
                     if not line: continue
-                    
                     try:
                         chunk = json.loads(line)
                         if "message" in chunk and "content" in chunk["message"]:
                             word = chunk["message"]["content"]
                             full_response += word
                             
-                            # Send chunk to UI immediately
-                            await websocket.send_json({
-                                "type": "chunk", 
-                                "content": word
-                            })
+                            # Send chunk to UI
+                            await websocket.send_json({"type": "chunk", "content": word})
                             
                         if chunk.get("done", False):
                             break
                     except:
                         pass
         
-        # Stream finished, tell UI to speak
-        await websocket.send_json({
-            "type": "end", 
-            "full_text": full_response
-        })
+        # End of stream -> Speak
+        await websocket.send_json({"type": "end", "full_text": full_response})
 
     except Exception as e:
-        print(f"Stream Error: {e}")
-        error_msg = "I lost the connection."
+        print(f"Error: {e}")
+        error_msg = "I lost the connection briefly."
         await websocket.send_json({"type": "chunk", "content": error_msg})
         await websocket.send_json({"type": "end", "full_text": error_msg})
 
@@ -86,26 +79,25 @@ async def stream_conversation(user_text: str, websocket: WebSocket):
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    print("🔗 Client Connected")
     
     try:
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
             
-            # 1. Acknowledge Receipt
+            # 1. Update Status
             await websocket.send_json({"type": "status", "content": "Thinking..."})
             
-            # 2. Start Streaming
+            # 2. Stream Answer
             await stream_conversation(data, websocket)
             
             # 3. Reset Status
             await websocket.send_json({"type": "status", "content": "Listening..."})
             
     except WebSocketDisconnect:
-        print("📴 Client Disconnected")
+        pass
 
-# 5. FRONTEND (STREAMING READY)
+# 5. FRONTEND (CLEAN PRODUCTION UI)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -113,7 +105,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Founder AI (Streaming)</title>
+    <title>Founder Sales AI</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -122,7 +114,7 @@ async def serve_ui():
     <style>
         body { background: #0f172a; color: #fff; font-family: 'Segoe UI', sans-serif; }
         .orb-container {
-            width: 140px; height: 140px;
+            width: 150px; height: 150px;
             border-radius: 50%;
             background: radial-gradient(circle, #0f2e4a 0%, #020617 100%);
             border: 2px solid #1e3a8a;
@@ -135,7 +127,7 @@ async def serve_ui():
         .orb-container:hover { transform: scale(1.05); border-color: #38bdf8; }
         .orb-container.listening { border-color: #ef4444; box-shadow: 0 0 50px rgba(239, 68, 68, 0.4); animation: pulse-red 1.5s infinite; }
         .orb-container.speaking { border-color: #22c55e; box-shadow: 0 0 50px rgba(34, 197, 94, 0.4); animation: pulse-green 1.5s infinite; }
-        .orb-container.processing { border-color: #f59e0b; animation: spin 1s linear infinite; }
+        .orb-container.thinking { border-color: #f59e0b; animation: spin 1s linear infinite; }
         @keyframes pulse-red { 0% {box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);} }
         @keyframes pulse-green { 0% {box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7);} 70% {box-shadow: 0 0 0 20px rgba(34, 197, 94, 0);} }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
@@ -147,7 +139,7 @@ async def serve_ui():
     <script type="text/babel">
         function App() {
             const [status, setStatus] = React.useState("Disconnected");
-            const [aiState, setAiState] = React.useState("idle"); // idle, listening, thinking, speaking
+            const [aiState, setAiState] = React.useState("idle"); 
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
             
@@ -166,16 +158,13 @@ async def serve_ui():
                     const data = JSON.parse(e.data);
                     
                     if (data.type === "status") {
-                        // "Thinking..."
                         setAiState("thinking");
-                        setResponse(""); // Clear old response
+                        setResponse(""); 
                     }
                     else if (data.type === "chunk") {
-                        // Append text as it arrives
                         setResponse(prev => prev + data.content);
                     }
                     else if (data.type === "end") {
-                        // Full sentence done, speak it
                         speakResponse(data.full_text);
                     }
                 };
@@ -184,7 +173,7 @@ async def serve_ui():
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
-                    recognition.current.continuous = false; // Important: Stop after 1 sentence
+                    recognition.current.continuous = false; 
                     recognition.current.lang = 'en-US';
 
                     recognition.current.onstart = () => {
@@ -192,7 +181,6 @@ async def serve_ui():
                     };
                     recognition.current.onend = () => {
                         if (isConversationActive.current && aiState === "listening") {
-                            // If it stopped but we didn't get a result, restart
                              try { recognition.current.start(); } catch(e) {}
                         }
                     };
@@ -210,7 +198,7 @@ async def serve_ui():
                 window.speechSynthesis.cancel();
                 
                 const utterance = new SpeechSynthesisUtterance(text);
-                window.currentUtterance = utterance; // Keep alive
+                window.currentUtterance = utterance; 
 
                 let voices = window.speechSynthesis.getVoices();
                 const setVoice = () => {
@@ -239,24 +227,17 @@ async def serve_ui():
                     setAiState("idle");
                 } else {
                     isConversationActive.current = true;
-                    window.speechSynthesis.resume(); // Unlock audio
+                    window.speechSynthesis.resume(); 
                     setAiState("listening");
                     try { recognition.current.start(); } catch(e) {}
                 }
             };
 
-            // Test Audio Button
-            const testAudio = () => {
-                const u = new SpeechSynthesisUtterance("Audio check.");
-                window.speechSynthesis.speak(u);
-            };
-
             return (
                 <div className="flex flex-col items-center w-full px-4">
-                    <div className="mb-8 text-center">
-                        <h1 className="text-3xl font-bold tracking-widest text-sky-400">FOUNDER AI</h1>
-                        <p className="text-gray-500 text-xs mt-2">{status}</p>
-                        <button onClick={testAudio} className="mt-2 text-[10px] border border-gray-700 px-2 py-1 rounded text-gray-400 hover:text-white">Test Audio</button>
+                    <div className="mb-10 text-center">
+                        <h1 className="text-3xl font-bold tracking-[0.2em] text-sky-400 drop-shadow-lg">FOUNDER AGENT</h1>
+                        <p className="text-gray-600 text-[10px] mt-2 uppercase">{status}</p>
                     </div>
 
                     <div className={`orb-container ${aiState}`} onClick={toggle}>
@@ -264,22 +245,28 @@ async def serve_ui():
                             aiState === 'listening' ? 'microphone' : 
                             aiState === 'speaking' ? 'volume-up' : 
                             aiState === 'thinking' ? 'sync fa-spin' : 'power-off'
-                        } text-4xl text-white`}></i>
+                        } text-5xl text-white`}></i>
                     </div>
 
-                    <div className="mt-6 text-center h-6">
-                        <span className="text-sm font-mono text-gray-400 uppercase tracking-widest">{aiState}</span>
+                    <div className="mt-8 text-center h-6">
+                        <span className="text-xs font-mono text-sky-200 uppercase tracking-widest animate-pulse">
+                            {aiState === 'idle' ? 'TAP TO START' : aiState}
+                        </span>
                     </div>
 
-                    <div className="w-full max-w-md mt-6 min-h-[120px] flex flex-col justify-end space-y-4">
+                    <div className="w-full max-w-lg mt-8 space-y-4">
                         {transcript && (
-                            <div className="self-end bg-slate-800 text-sky-100 px-4 py-2 rounded-2xl rounded-tr-none text-sm max-w-[90%]">
-                                {transcript}
+                            <div className="flex justify-end">
+                                <div className="bg-slate-800 text-sky-100 px-5 py-3 rounded-2xl rounded-tr-none text-sm shadow-lg max-w-[85%]">
+                                    {transcript}
+                                </div>
                             </div>
                         )}
                         {response && (
-                            <div className="self-start text-white text-lg font-medium leading-snug">
-                                {response}
+                            <div className="flex justify-start">
+                                <div className="text-white text-lg font-medium leading-relaxed drop-shadow-md">
+                                    {response}
+                                </div>
                             </div>
                         )}
                     </div>
