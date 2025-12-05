@@ -15,50 +15,42 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Founder AI (Multi-Lang)", version="14.0.0")
+app = FastAPI(title="Founder AI (Always On)", version="15.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# 3. MEMORY (Sliding Window)
+# 3. MEMORY
 local_memory = {}
 
 async def get_chat_history(session_id: str):
-    if session_id in local_memory:
-        return local_memory[session_id]
+    if session_id in local_memory: return local_memory[session_id]
     return []
 
 async def update_chat_history(session_id: str, new_messages: list):
     history = await get_chat_history(session_id)
     history.extend(new_messages)
-    # Keep System + Last 10 messages
     if len(history) > 11: 
         system_msg = history[0]
         recent_history = history[-10:] 
         history = [system_msg] + recent_history
     local_memory[session_id] = history
 
-# 4. STREAMING LOGIC (MULTI-LANG SUPPORT)
+# 4. STREAMING LOGIC
 async def stream_conversation(session_id: str, user_text: str, websocket: WebSocket):
-    
-    # --- MULTI-LANGUAGE PROMPT ---
     system_prompt = (
         "You are an elite Sales Closer. "
         "Goal: Book a meeting. "
         "Rules: "
-        "1. DETECT the language of the user. "
-        "2. REPLY IN THE EXACT SAME LANGUAGE. "
-        "3. START your response with a language code in brackets. Examples: [EN] for English, [ES] for Spanish, [FR] for French, [HI] for Hindi, [DE] for German, [ZH] for Chinese. "
-        "4. Keep answer under 20 words. End with a question."
+        "1. DETECT language. REPLY IN SAME LANGUAGE. "
+        "2. Start response with language tag like [EN], [ES], [FR]. "
+        "3. Keep answer under 20 words. End with a question."
     )
     
     history = await get_chat_history(session_id)
-    if not history:
-        history = [{"role": "system", "content": system_prompt}]
+    if not history: history = [{"role": "system", "content": system_prompt}]
     
-    current_exchange = [{"role": "user", "content": user_text}]
-    messages_to_send = history + current_exchange
-
+    messages_to_send = history + [{"role": "user", "content": user_text}]
     full_response = ""
     
     try:
@@ -74,7 +66,6 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                 },
                 timeout=60.0
             ) as response:
-                
                 async for line in response.aiter_lines():
                     if not line: continue
                     try:
@@ -82,50 +73,37 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                         if "message" in chunk and "content" in chunk["message"]:
                             word = chunk["message"]["content"]
                             full_response += word
-                            
-                            # Send chunk to UI
                             await websocket.send_json({"type": "chunk", "content": word})
-                            
-                        if chunk.get("done", False):
-                            break
-                    except:
-                        pass
+                        if chunk.get("done", False): break
+                    except: pass
         
-        # Save Memory
         await update_chat_history(session_id, [
             {"role": "user", "content": user_text},
             {"role": "assistant", "content": full_response}
         ])
-
-        # End of stream -> Speak
         await websocket.send_json({"type": "end", "full_text": full_response})
 
-    except Exception as e:
-        print(f"Error: {e}")
-        error_msg = "[EN] Connection unstable."
-        await websocket.send_json({"type": "chunk", "content": error_msg})
-        await websocket.send_json({"type": "end", "full_text": error_msg})
+    except Exception:
+        err = "[EN] I lost connection."
+        await websocket.send_json({"type": "chunk", "content": err})
+        await websocket.send_json({"type": "end", "full_text": err})
 
-# 5. WEBSOCKET HANDLER
+# 5. WEBSOCKET
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     session_id = str(id(websocket))
-    
     try:
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
-            
             await websocket.send_json({"type": "status", "content": "Thinking..."})
             await stream_conversation(session_id, data, websocket)
             await websocket.send_json({"type": "status", "content": "Listening..."})
-            
     except WebSocketDisconnect:
-        if session_id in local_memory:
-            del local_memory[session_id]
+        if session_id in local_memory: del local_memory[session_id]
 
-# 6. FRONTEND (SMART VOICE SWITCHER)
+# 6. FRONTEND (INFINITE LISTENING FIX)
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -133,7 +111,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Founder AI (Multi-Lang)</title>
+    <title>Founder AI (Always On)</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -186,8 +164,9 @@ async def serve_ui():
                     const data = JSON.parse(e.data);
                     
                     if (data.type === "status") {
-                        setAiState("thinking");
-                        setResponse(""); 
+                        // Only change state if we are not speaking to avoid interruption
+                        if(aiState !== "speaking") setAiState("thinking");
+                        if(data.content === "Thinking...") setResponse("");
                     }
                     else if (data.type === "chunk") {
                         setResponse(prev => prev + data.content);
@@ -197,71 +176,80 @@ async def serve_ui():
                     }
                 };
 
-                // Init Speech (AUTO LANGUAGE DETECTION FROM BROWSER)
+                // --- INFINITE LISTENER LOGIC ---
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
-                    recognition.current.continuous = false; 
-                    // REMOVED 'en-US' hardcode. Now it uses your Browser/OS default language.
-                    // recognition.current.lang = 'en-US'; 
-
+                    recognition.current.continuous = false; // Must be false for instant results
+                    
+                    // START
                     recognition.current.onstart = () => {
                         if (isConversationActive.current) setAiState("listening");
                     };
+
+                    // END - THE CRITICAL FIX
                     recognition.current.onend = () => {
-                        if (isConversationActive.current && aiState === "listening") {
-                             try { recognition.current.start(); } catch(e) {}
+                        // If user clicked stop, do nothing.
+                        if (!isConversationActive.current) {
+                            setAiState("idle");
+                            return;
                         }
+
+                        // If AI is speaking, DO NOT restart yet (wait for speech to finish)
+                        if (aiState === "speaking") {
+                            return;
+                        }
+
+                        // If AI is NOT speaking, RESTART IMMEDIATELY
+                        // This handles the "silence timeout"
+                        console.log("Silence detected. Restarting listener...");
+                        try { recognition.current.start(); } catch(e) {}
                     };
+
+                    // RESULT
                     recognition.current.onresult = (event) => {
                         const text = event.results[0][0].transcript;
                         setTranscript(text);
                         setAiState("thinking");
                         ws.current.send(text);
                     };
+
+                    // ERROR
+                    recognition.current.onerror = (event) => {
+                        console.log("Speech Error:", event.error);
+                        // If 'no-speech' error (silence), ignore it. onend will restart it.
+                    };
                 }
             }, [aiState]);
 
-            // --- SMART MULTI-LANGUAGE SPEAKER ---
             const speakResponse = (fullText) => {
                 setAiState("speaking");
                 window.speechSynthesis.cancel();
                 
-                // 1. Detect Language from Tag [EN], [ES], etc.
-                let langCode = 'en'; // Default
+                // Multi-Lang Logic
+                let langCode = 'en';
                 let textToSpeak = fullText;
-
-                // Parse Tag
                 const tagMatch = fullText.match(/^\[([A-Z]{2})\]/);
                 if (tagMatch) {
-                    langCode = tagMatch[1].toLowerCase(); // es, fr, hi, de
-                    textToSpeak = fullText.replace(tagMatch[0], '').trim(); // Remove tag for speech
+                    langCode = tagMatch[1].toLowerCase();
+                    textToSpeak = fullText.replace(tagMatch[0], '').trim();
                 }
 
-                // 2. Select Best Voice for that Language
                 const utterance = new SpeechSynthesisUtterance(textToSpeak);
                 window.currentUtterance = utterance; 
 
                 const voices = window.speechSynthesis.getVoices();
-                
-                // PRIORITY: Google Native -> Any Native -> Default
                 let selectedVoice = voices.find(v => v.lang.startsWith(langCode) && v.name.includes("Google"));
-                
-                if (!selectedVoice) {
-                    selectedVoice = voices.find(v => v.lang.startsWith(langCode));
-                }
-
+                if (!selectedVoice) selectedVoice = voices.find(v => v.lang.startsWith(langCode));
                 if (selectedVoice) {
                     utterance.voice = selectedVoice;
-                    // Adjust rate for languages
-                    utterance.rate = langCode === 'es' || langCode === 'hi' ? 0.9 : 1.0; 
+                    utterance.rate = langCode === 'es' ? 0.9 : 1.0; 
                 }
-
-                console.log(`Speaking [${langCode}] using voice:`, selectedVoice ? selectedVoice.name : "System Default");
 
                 utterance.onend = () => {
                     if (isConversationActive.current) {
                         setAiState("listening");
+                        // FORCE RESTART LISTENER AFTER SPEAKING
                         try { recognition.current.start(); } catch(e) {}
                     } else {
                         setAiState("idle");
@@ -285,13 +273,12 @@ async def serve_ui():
                 }
             };
 
-            // Clean display text (Remove [EN] tags for UI)
             const cleanResponse = response.replace(/^\[[A-Z]{2}\]/, '');
 
             return (
                 <div className="flex flex-col items-center w-full px-4">
                     <div className="mb-10 text-center">
-                        <h1 className="text-3xl font-bold tracking-[0.2em] text-sky-400 drop-shadow-lg">GLOBAL AGENT</h1>
+                        <h1 className="text-3xl font-bold tracking-[0.2em] text-sky-400 drop-shadow-lg">FOUNDER AGENT</h1>
                         <p className="text-gray-600 text-[10px] mt-2 uppercase">{status}</p>
                     </div>
 
