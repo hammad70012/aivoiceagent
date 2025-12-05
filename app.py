@@ -2,10 +2,11 @@ import os
 import json
 import asyncio
 import uvicorn
+import sys
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from groq import AsyncGroq
+from ollama import AsyncClient
 import redis.asyncio as redis
 import asyncpg
 from dotenv import load_dotenv
@@ -14,23 +15,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # KEYS & URLS
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-AI_MODEL = os.getenv("AI_MODEL", "llama-3.3-70b-versatile") 
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 
-if not GROQ_API_KEY:
-    raise ValueError("❌ .env file missing or GROQ_API_KEY not found!")
-
 # 2. APP SETUP
-app = FastAPI(title="Groq Sales Agent", version="2.4.0")
+app = FastAPI(title="Ollama Sales Agent", version="2.6.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
 # 3. CLIENT SETUP
-client = AsyncGroq(api_key=GROQ_API_KEY)
+client = AsyncClient(host=OLLAMA_HOST)
 
 # 4. INFRASTRUCTURE (DB & REDIS)
 class Infrastructure:
@@ -41,18 +39,23 @@ class Infrastructure:
     async def connect(self):
         # Postgres
         try:
-            self.pool = await asyncpg.create_pool(DATABASE_URL)
-            print(f"✅ PostgreSQL Connected")
-            await self.init_db()
+            if DATABASE_URL:
+                self.pool = await asyncpg.create_pool(DATABASE_URL)
+                print(f"✅ PostgreSQL Connected")
+                await self.init_db()
         except Exception as e:
-            print(f"❌ DB Connection Error: {e}")
+            print(f"⚠️ DB Connection Warning: {e}")
 
         # Redis
         try:
-            self.redis = redis.from_url(REDIS_URL, decode_responses=True)
-            print(f"✅ Redis Connected")
+            if REDIS_URL:
+                self.redis = redis.from_url(REDIS_URL, decode_responses=True)
+                # Test connection
+                await self.redis.ping()
+                print(f"✅ Redis Connected")
         except Exception as e:
-            print(f"❌ Redis Error: {e}")
+            print(f"⚠️ Redis Connection Warning (Chat history will be temporary): {e}")
+            self.redis = None
 
     async def init_db(self):
         if self.pool:
@@ -84,57 +87,92 @@ async def shutdown():
 
 # 5. INTELLIGENT LAYER (SALES PERSONA)
 async def process_conversation(session_id: str, user_text: str):
-    history_key = f"groq_sales_chat:{session_id}"
-    raw_history = await infra.redis.get(history_key)
+    history_key = f"ollama_sales_chat:{session_id}"
+    messages = []
     
-    # --- SALES SYSTEM PROMPT ---
-    # This instructs the AI to act like a human closer.
+    # --- SALES SYSTEM PROMPT (THE CLOSER) ---
     system_prompt = (
-        "You are Alex, a senior sales executive. "
-        "Your goal is to have a natural, spoken conversation with the user to qualify them as a lead and eventually book a meeting or close a deal. "
-        "RULES:"
-        "1. Speak like a human, not a machine. Be professional but warm."
-        "2. Keep responses SHORT (1-2 sentences maximum). Long answers are bad for voice chat."
-        "3. Ask only ONE question at a time to keep the conversation flowing."
-        "4. If the user greets you, introduce yourself briefly and ask how you can help."
-        "5. Your English must be flawless and professional."
+        "You are Alex, an elite Sales Closer. "
+        "Your ONLY goal is to qualify this lead and book a meeting or close the deal. "
+        "BEHAVIOR:"
+        "1. Be direct, confident, and high-energy. Do not be passive."
+        "2. Keep responses SHORT (maximum 1 sentence). Use spoken English style."
+        "3. Always end with a question to drive the sale forward."
+        "4. If they have objections, overcome them quickly and pivot back to the close."
+        "5. Do not use robotic lists. Talk like a real person on the phone."
     )
 
-    messages = json.loads(raw_history) if raw_history else [
-        {"role": "system", "content": system_prompt}
-    ]
+    # 1. Try to get history from Redis
+    try:
+        if infra.redis:
+            raw_history = await infra.redis.get(history_key)
+            if raw_history:
+                messages = json.loads(raw_history)
+    except Exception as e:
+        print(f"Error reading Redis: {e}")
+
+    # 2. If no history, initialize
+    if not messages:
+        messages = [{"role": "system", "content": system_prompt}]
     
     messages.append({"role": "user", "content": user_text})
     
+    ai_response_content = ""
+
     try:
-        completion = await client.chat.completions.create(
+        print(f"🤔 Sending to Ollama ({AI_MODEL})...")
+        
+        # 3. Call Ollama
+        response = await client.chat(
             model=AI_MODEL,
             messages=messages,
-            temperature=0.7, # Slightly higher for more natural human variance
-            max_tokens=150,  # Keep it short
+            options={
+                'temperature': 0.6, # Lower temp for more focused closing
+                'num_predict': 60   # Keep it very short for speed
+            }
         )
-        ai_response_content = completion.choices[0].message.content
+
+        # 4. ROBUST RESPONSE EXTRACTION (Fixes the "Processing" hang)
+        # The library returns an object, but sometimes a dict depending on version.
+        if hasattr(response, 'message'):
+            ai_response_content = response.message.content
+        elif 'message' in response:
+            ai_response_content = response['message']['content']
+        else:
+            ai_response_content = str(response)
+
+        print(f"✅ Ollama replied: {ai_response_content}")
 
     except Exception as e:
-        print(f"API Error: {e}")
-        return "I'm having trouble hearing you clearly, could you repeat that?"
+        print(f"❌ Ollama API Error: {e}")
+        # IMPORTANT: Return an error message so the UI doesn't hang
+        return "I'm having a technical issue connecting to my brain. Can you check my server?"
 
-    # Update Memory
+    # 5. Save History & Log
     messages.append({"role": "assistant", "content": ai_response_content})
-    await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
     
-    # Log to DB
+    # Save to Redis (Async)
+    if infra.redis:
+        try:
+            await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
+        except Exception as e:
+            print(f"Redis Write Error: {e}")
+
+    # Save to DB (Background Task)
     asyncio.create_task(save_log(session_id, user_text, ai_response_content))
     
     return ai_response_content
 
 async def save_log(session_id, user, ai):
     if infra.pool:
-        async with infra.pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO conversation_logs (session_id, user_msg, ai_msg, model_used) VALUES ($1, $2, $3, $4)",
-                session_id, user, ai, AI_MODEL
-            )
+        try:
+            async with infra.pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO conversation_logs (session_id, user_msg, ai_msg, model_used) VALUES ($1, $2, $3, $4)",
+                    session_id, user, ai, AI_MODEL
+                )
+        except Exception as e:
+            print(f"DB Log Error: {e}")
 
 # 6. WEBSOCKET HANDLER
 @app.websocket("/ws")
@@ -148,6 +186,8 @@ async def websocket_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             if not data.strip(): continue
             
+            print(f"🎤 User said: {data}")
+
             # Process with Sales Logic
             response = await process_conversation(session_id, data)
             
@@ -156,8 +196,14 @@ async def websocket_endpoint(websocket: WebSocket):
             
     except WebSocketDisconnect:
         print(f"📴 Lead Disconnected: {session_id}")
+    except Exception as e:
+        print(f"🔥 Critical WebSocket Error: {e}")
+        try:
+            await websocket.send_text("Connection error. Please refresh.")
+        except:
+            pass
 
-# 7. FRONTEND (Refined for Continuous Conversation)
+# 7. FRONTEND
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -165,7 +211,7 @@ async def serve_ui():
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>AI Sales Agent</title>
+    <title>AI Sales Closer</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
@@ -188,7 +234,6 @@ async def serve_ui():
         }
         .orb-container:hover { transform: scale(1.05); border-color: #38bdf8; }
         
-        /* LISTENING STATE (RED) */
         .orb-container.listening {
             border-color: #ef4444;
             background: radial-gradient(circle, #450a0a 0%, #020617 100%);
@@ -196,7 +241,6 @@ async def serve_ui():
             animation: pulse-red 1.5s infinite;
         }
         
-        /* SPEAKING STATE (GREEN/BLUE) */
         .orb-container.speaking {
             border-color: #22c55e;
             background: radial-gradient(circle, #052e16 0%, #020617 100%);
@@ -204,7 +248,6 @@ async def serve_ui():
             animation: pulse-green 1.5s infinite;
         }
 
-        /* PROCESSING STATE */
         .orb-container.processing {
             border-color: #f59e0b;
             animation: spin 1s linear infinite;
@@ -221,18 +264,15 @@ async def serve_ui():
     <script type="text/babel">
         function App() {
             const [status, setStatus] = React.useState("Disconnected");
-            // Modes: 'idle', 'listening', 'processing', 'speaking'
             const [mode, setMode] = React.useState("idle");
             const [transcript, setTranscript] = React.useState("");
             const [response, setResponse] = React.useState("");
             
-            // Refs for state management inside callbacks
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
-            const isConversationActive = React.useRef(false); // Master switch
+            const isConversationActive = React.useRef(false);
 
             React.useEffect(() => {
-                // 1. WebSocket Setup
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
                 ws.current = new WebSocket(protocol + window.location.host + "/ws");
                 
@@ -245,7 +285,6 @@ async def serve_ui():
                     speakResponse(text);
                 };
 
-                // 2. Speech Recognition Setup
                 if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                     recognition.current = new SpeechRecognition();
@@ -258,7 +297,6 @@ async def serve_ui():
                     };
 
                     recognition.current.onend = () => {
-                        // If we shouldn't be stopped, restart
                         if (isConversationActive.current && mode !== "speaking" && mode !== "processing") {
                             try { recognition.current.start(); } catch(e) {}
                         } else if (!isConversationActive.current) {
@@ -267,23 +305,16 @@ async def serve_ui():
                     };
 
                     recognition.current.onresult = (event) => {
-                        // Get the latest result
                         const resultsLength = event.results.length - 1;
                         const text = event.results[resultsLength][0].transcript;
                         
                         if (text.trim() && isConversationActive.current) {
                             setTranscript(text);
                             setMode("processing");
-                            
-                            // Stop mic temporarily so it doesn't hear itself
                             recognition.current.stop();
-                            
-                            // Send to AI
                             ws.current.send(text);
                         }
                     };
-                } else {
-                    alert("Browser not supported. Please use Chrome.");
                 }
 
                 return () => {
@@ -291,27 +322,31 @@ async def serve_ui():
                 };
             }, [mode]);
 
-            // 3. Voice Logic (English Accent)
             const speakResponse = (text) => {
                 setMode("speaking");
                 const synth = window.speechSynthesis;
                 const utterance = new SpeechSynthesisUtterance(text);
                 
-                // Get voices and select best English one
                 let voices = synth.getVoices();
-                // If voices aren't loaded yet, wait for them (Chrome quirk)
+                const setVoice = () => {
+                    utterance.voice = voices.find(v => v.name === "Google US English") || 
+                                      voices.find(v => v.name.includes("Zira")) ||
+                                      voices.find(v => v.lang.startsWith("en-US")) || 
+                                      voices[0];
+                }
+
                 if (!voices.length) {
                     synth.onvoiceschanged = () => {
                         voices = synth.getVoices();
-                        utterance.voice = selectVoice(voices);
+                        setVoice();
                         synth.speak(utterance);
                     };
                 } else {
-                    utterance.voice = selectVoice(voices);
+                    setVoice();
                     synth.speak(utterance);
                 }
 
-                utterance.rate = 1.05; // Slightly faster for sales
+                utterance.rate = 1.1; 
                 utterance.pitch = 1.0;
 
                 utterance.onend = () => {
@@ -324,24 +359,13 @@ async def serve_ui():
                 };
             };
 
-            const selectVoice = (voices) => {
-                // Priority: Google US English -> Microsoft Zira -> Any English
-                return voices.find(v => v.name === "Google US English") || 
-                       voices.find(v => v.name.includes("Zira")) ||
-                       voices.find(v => v.lang.startsWith("en-US")) || 
-                       voices[0];
-            };
-
-            // 4. Main Interaction Toggle
             const toggleConversation = () => {
                 if (isConversationActive.current) {
-                    // Stop everything
                     isConversationActive.current = false;
                     recognition.current.stop();
                     window.speechSynthesis.cancel();
                     setMode("idle");
                 } else {
-                    // Start everything
                     isConversationActive.current = true;
                     setMode("listening");
                     try { recognition.current.start(); } catch(e) {}
@@ -350,7 +374,6 @@ async def serve_ui():
 
             return (
                 <div className="flex flex-col items-center">
-                    
                     <div className="mb-12 text-center">
                         <h1 className="text-4xl font-bold glow-text tracking-widest text-sky-400">SALES AGENT</h1>
                         <p className="text-gray-500 text-sm mt-3 uppercase tracking-widest font-semibold">{status}</p>
