@@ -2,43 +2,33 @@ import os
 import json
 import asyncio
 import sys
-import time
-
-# --- SAFETY CHECK: Dependencies ---
-try:
-    from ollama import AsyncClient
-    import uvicorn
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    from fastapi.responses import HTMLResponse
-    from fastapi.middleware.cors import CORSMiddleware
-    import redis.asyncio as redis
-    import asyncpg
-    from dotenv import load_dotenv
-except ImportError as e:
-    print(f"❌ CRITICAL ERROR: Missing libraries! {e}")
-    sys.exit(1)
+import httpx  # We use this for direct, reliable connection
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+import redis.asyncio as redis
+import asyncpg
+from dotenv import load_dotenv
 
 # 1. LOAD CONFIGURATION
 load_dotenv()
 
 # KEYS & URLS
-# CHANGED: Use 127.0.0.1 instead of localhost for better reliability
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+# Ensure this points to where 'ollama serve' is running
+OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 DATABASE_URL = os.getenv("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL")
 
 # 2. APP SETUP
-app = FastAPI(title="Ollama Sales Agent", version="2.8.0")
+app = FastAPI(title="Ollama Sales Agent", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# 3. CLIENT SETUP
-client = AsyncClient(host=OLLAMA_HOST)
-
-# 4. INFRASTRUCTURE (DB & REDIS)
+# 3. INFRASTRUCTURE (DB & REDIS)
 class Infrastructure:
     def __init__(self):
         self.pool = None
@@ -76,7 +66,7 @@ async def startup():
 async def shutdown():
     await infra.disconnect()
 
-# 5. INTELLIGENT LAYER (SALES PERSONA)
+# 4. INTELLIGENT LAYER (DIRECT API CALL)
 async def process_conversation(session_id: str, user_text: str):
     history_key = f"ollama_sales_chat:{session_id}"
     messages = []
@@ -85,9 +75,10 @@ async def process_conversation(session_id: str, user_text: str):
     system_prompt = (
         "You are Alex, an elite Sales Closer. "
         "Your ONLY goal is to qualify this lead and book a meeting. "
-        "1. Keep responses SHORT (1 sentence only). "
-        "2. Always end with a question. "
-        "3. Be high energy and professional."
+        "RULES:"
+        "1. Keep responses SHORT (1 sentence maximum). "
+        "2. Do not use bullet points or lists."
+        "3. Always end with a relevant question."
     )
 
     # 1. Load History
@@ -106,45 +97,65 @@ async def process_conversation(session_id: str, user_text: str):
     
     ai_response_content = ""
 
+    # 2. Call Ollama (Direct HTTP for Reliability)
+    print(f"🤔 Sending to Ollama ({AI_MODEL})...")
+    
     try:
-        print(f"🤔 Sending to Ollama ({AI_MODEL})...")
-        
-        # --- FIXED: ADDED TIMEOUT ---
-        # If Ollama doesn't reply in 8 seconds, we abort so the UI doesn't freeze.
-        response = await asyncio.wait_for(
-            client.chat(
-                model=AI_MODEL,
-                messages=messages,
-                options={'temperature': 0.6, 'num_predict': 60}
-            ),
-            timeout=8.0 
-        )
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{OLLAMA_URL}/api/chat",
+                json={
+                    "model": AI_MODEL,
+                    "messages": messages,
+                    "stream": False,  # Important: No streaming prevents hanging
+                    "options": {
+                        "temperature": 0.6,
+                        "num_predict": 60 
+                    }
+                },
+                timeout=15.0 # 15 Seconds Max Wait
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                ai_response_content = data['message']['content']
+                print(f"✅ Ollama replied: {ai_response_content}")
+            else:
+                print(f"❌ Ollama Error {response.status_code}: {response.text}")
+                return "I'm having a technical issue. Can we talk later?"
 
-        # Handle different response formats
-        if hasattr(response, 'message'):
-            ai_response_content = response.message.content
-        elif 'message' in response:
-            ai_response_content = response['message']['content']
-        else:
-            ai_response_content = str(response)
-
-        print(f"✅ Ollama replied: {ai_response_content}")
-
-    except asyncio.TimeoutError:
-        print("❌ Ollama Timed Out!")
-        return "I apologize, the connection is a bit slow. Could you say that again?"
+    except httpx.ConnectError:
+        print("❌ Could not connect to Ollama. Is 'ollama serve' running?")
+        return "I can't connect to my brain right now. Please check the server."
+    except httpx.TimeoutException:
+        print("❌ Ollama timed out generating response.")
+        return "I'm thinking a bit too slow today. Could you repeat that?"
     except Exception as e:
-        print(f"❌ Ollama Error: {e}")
-        return "I am having a technical issue connecting to the AI brain. Is Ollama running?"
+        print(f"❌ Unexpected Error: {e}")
+        return "Sorry, I lost my train of thought."
 
-    # Update History
+    # 3. Update History
     messages.append({"role": "assistant", "content": ai_response_content})
     if infra.redis:
         await infra.redis.set(history_key, json.dumps(messages, default=str), ex=3600)
     
+    # 4. Log to DB
+    if infra.pool:
+        asyncio.create_task(save_log(session_id, user_text, ai_response_content))
+
     return ai_response_content
 
-# 6. WEBSOCKET HANDLER
+async def save_log(session_id, user, ai):
+    try:
+        async with infra.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO conversation_logs (session_id, user_msg, ai_msg, model_used) VALUES ($1, $2, $3, $4)",
+                session_id, user, ai, AI_MODEL
+            )
+    except:
+        pass
+
+# 5. WEBSOCKET HANDLER
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -167,7 +178,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"🔥 Critical WebSocket Error: {e}")
 
-# 7. FRONTEND
+# 6. FRONTEND
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -341,4 +352,5 @@ async def serve_ui():
     """
 
 if __name__ == "__main__":
+    # Ensure you install httpx: pip install httpx
     uvicorn.run("main:app", host="0.0.0.0", port=5047, reload=True)
