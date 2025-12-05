@@ -3,6 +3,7 @@ import json
 import asyncio
 import sys
 import re
+import uuid
 import httpx
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
@@ -16,60 +17,59 @@ OLLAMA_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 AI_MODEL = os.getenv("AI_MODEL", "qwen2.5:1.5b") 
 
 # 2. APP SETUP
-app = FastAPI(title="Professional AI Interface", version="24.0.0")
+app = FastAPI(title="Professional AI Interface", version="25.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# --- 3. KNOWLEDGE BASE (PRESERVED) ---
+# --- 3. KNOWLEDGE BASE WITH SUGGESTION LOGIC ---
 BUSINESS_PROMPTS = {
     "default": (
         "You are James, a Senior Client Success Manager. "
-        "BEHAVIOR: Extremely polite, patient, and respectful. "
-        "RULES: "
-        "1. NEVER interrupt. Acknowledge what the user said first. "
-        "2. Speak clearly and calmly. "
-        "3. Keep responses concise (2-3 sentences). "
-        "4. Ask permission before moving to the next step. "
-        "OPENER: 'Hello, this is James. Thank you for connecting. How may I assist you today?'"
+        "BEHAVIOR: Polite, patient, and respectful. "
+        "INSTRUCTION: "
+        "1. Acknowledge user input first. "
+        "2. Keep response under 3 sentences. "
+        "3. At the end, provide 2 or 3 short follow-up options for the user enclosed in double angle brackets like this: <<Pricing details|Book a demo>>. "
+        "OPENER: 'Hello, this is James. Thank you for connecting. How may I assist you today? <<I have a question|Tell me about services>>'"
     ),
     "luxury_sales": (
         "You are Elizabeth, a Senior Consultant for Premium Accounts. "
-        "BEHAVIOR: You offer 'White Glove' service. Calm, unhurried, and attentive. "
-        "STRATEGY: "
-        "1. Active Listening: Repeat back the key concern briefly. "
-        "2. Discipline: Do not push for a sale. Push for understanding. "
-        "3. Tone: Soft, professional, warm. "
-        "OPENER: 'Good day, this is Elizabeth. I am here to help. To ensure I give you the best advice, could you tell me a little about your current situation?'"
+        "BEHAVIOR: White Glove service. Calm, unhurried. "
+        "INSTRUCTION: "
+        "1. Active Listening: Repeat back key concerns. "
+        "2. Do not push for a sale yet. "
+        "3. At the end, provide 2 classy response options for the user like this: <<Tell me more|What is the cost?>>. "
+        "OPENER: 'Good day, this is Elizabeth. To ensure I give you the best advice, could you tell me a little about your current situation? <<Looking to invest|Just browsing>>'"
     )
 }
 
-# 4. MEMORY
+# 4. PERSISTENT MEMORY (Using Client ID)
 local_memory = {}
 
-async def get_chat_history(session_id: str):
-    if session_id in local_memory: return local_memory[session_id]
+async def get_chat_history(client_id: str):
+    if client_id in local_memory: return local_memory[client_id]
     return []
 
-async def update_chat_history(session_id: str, new_messages: list):
-    history = await get_chat_history(session_id)
+async def update_chat_history(client_id: str, new_messages: list):
+    history = await get_chat_history(client_id)
     history.extend(new_messages)
-    if len(history) > 12: 
-        history = [history[0]] + history[-10:]
-    local_memory[session_id] = history
+    # Increased Memory Window: Keep System + Last 20 turns
+    if len(history) > 21: 
+        history = [history[0]] + history[-20:]
+    local_memory[client_id] = history
 
-# 5. STREAMING LOGIC (PRESERVED)
-async def stream_conversation(session_id: str, user_text: str, websocket: WebSocket, business_id: str):
+# 5. STREAMING LOGIC WITH SUGGESTION PARSING
+async def stream_conversation(client_id: str, user_text: str, websocket: WebSocket, business_id: str):
     base_prompt = BUSINESS_PROMPTS.get(business_id, BUSINESS_PROMPTS["default"])
     
     system_instruction = (
         f"{base_prompt} "
-        "IMPORTANT: Write for Text-to-Speech. "
-        "Use full punctuation. No bullet points. "
-        "Be polite."
+        "IMPORTANT: Write naturally. "
+        "Always end with the options tag <<Option1|Option2>>."
     )
 
-    history = await get_chat_history(session_id)
+    history = await get_chat_history(client_id)
     if not history: 
         history = [{"role": "system", "content": system_instruction}]
 
@@ -88,7 +88,7 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                     "stream": True,
                     "options": {
                         "temperature": 0.6, 
-                        "num_predict": 100
+                        "num_predict": 150 # Slightly longer to allow for options
                     }
                 },
                 timeout=45.0
@@ -102,7 +102,8 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                             full_resp += word
                             sentence_buffer += word
                             
-                            if re.search(r'[.!?:]\s*$', sentence_buffer):
+                            # Check for sentence endings, but NOT if we are inside the << brackets
+                            if re.search(r'[.!?:]\s*$', sentence_buffer) and "<<" not in sentence_buffer:
                                 await websocket.send_json({
                                     "type": "audio_sentence", 
                                     "content": sentence_buffer.strip()
@@ -112,10 +113,11 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
                         if chunk.get("done", False): break
                     except: pass
         
+        # Send remaining text (which likely contains the options <<...>>)
         if sentence_buffer.strip():
             await websocket.send_json({"type": "audio_sentence", "content": sentence_buffer.strip()})
 
-        await update_chat_history(session_id, [
+        await update_chat_history(client_id, [
             {"role": "user", "content": user_text},
             {"role": "assistant", "content": full_resp}
         ])
@@ -126,20 +128,25 @@ async def stream_conversation(session_id: str, user_text: str, websocket: WebSoc
         err = "I apologize, the connection was briefly interrupted. Please continue."
         await websocket.send_json({"type": "audio_sentence", "content": err})
 
-# 6. WEBSOCKET
+# 6. WEBSOCKET WITH CLIENT ID
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default")):
+async def websocket_endpoint(websocket: WebSocket, biz: str = Query("default"), client_id: str = Query(None)):
     await websocket.accept()
-    session_id = str(id(websocket))
+    
+    # Use provided client_id or generate one if missing (fallback)
+    # Ideally, frontend generates this once and sends it every time.
+    final_id = client_id if client_id else str(uuid.uuid4())
+    
     try:
         while True:
             data = await websocket.receive_text()
             if not data.strip(): continue
-            await stream_conversation(session_id, data, websocket, biz)
+            await stream_conversation(final_id, data, websocket, biz)
     except WebSocketDisconnect:
-        if session_id in local_memory: del local_memory[session_id]
+        # We do NOT delete memory here, so if they reconnect, memory persists.
+        pass
 
-# 7. HIGH-END UI WITH "ALWAYS-ON" MIC
+# 7. FRONTEND
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return """
@@ -214,14 +221,19 @@ async def serve_ui():
         @keyframes ripple { 0% { width: 140px; height: 140px; opacity: 0.5; } 100% { width: 300px; height: 300px; opacity: 0; } }
         @keyframes spin { 100% { transform: rotate(360deg); } }
         
-        .status-badge {
-            font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
-            padding: 6px 12px; border-radius: 99px;
-            background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
-            color: rgba(255,255,255,0.6);
+        .suggestion-btn {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-size: 14px;
+            cursor: pointer;
             transition: all 0.3s;
+            backdrop-filter: blur(5px);
+            margin: 0 5px;
         }
-        .status-badge.active { background: rgba(255,255,255,0.1); color: white; border-color: rgba(255,255,255,0.3); }
+        .suggestion-btn:hover { background: rgba(255,255,255,0.2); transform: translateY(-2px); }
 
     </style>
 </head>
@@ -233,26 +245,28 @@ async def serve_ui():
             const [state, setState] = React.useState("idle"); 
             const [transcript, setTranscript] = React.useState("");
             const [role, setRole] = React.useState("luxury_sales");
+            const [suggestions, setSuggestions] = React.useState([]);
 
             const ws = React.useRef(null);
             const recognition = React.useRef(null);
             const synth = window.speechSynthesis;
             const audioQueue = React.useRef([]);
             const silenceTimer = React.useRef(null);
+            const shouldListen = React.useRef(false); 
+            const isProcessingAudio = React.useRef(false);
             
-            // --- NEW REFS FOR ALWAYS-ON LISTENING ---
-            const shouldListen = React.useRef(false); // Controls if we WANT to be listening
-            const isProcessingAudio = React.useRef(false); // Controls if AI is currently talking
+            // Generate a persistent Client ID for memory
+            const clientId = React.useRef(Math.random().toString(36).substring(7)).current;
 
-            // --- CONNECTION ---
             React.useEffect(() => {
                 const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
-                ws.current = new WebSocket(`${protocol}${window.location.host}/ws?biz=${role}`);
+                // PASS CLIENT ID TO BACKEND
+                ws.current = new WebSocket(`${protocol}${window.location.host}/ws?biz=${role}&client_id=${clientId}`);
                 
                 ws.current.onmessage = (event) => {
                     const data = JSON.parse(event.data);
                     if (data.type === "audio_sentence") {
-                        queueAudio(data.content);
+                        handleIncomingAudio(data.content);
                     }
                 };
 
@@ -260,7 +274,27 @@ async def serve_ui():
                 return () => { if(ws.current) ws.current.close(); };
             }, [role]);
 
-            // --- RECOGNITION SETUP ---
+            // --- SUGGESTION PARSING LOGIC ---
+            const handleIncomingAudio = (text) => {
+                // Regex to extract <<Option1|Option2>>
+                const suggestionMatch = text.match(/<<(.+?)>>/);
+                
+                let cleanText = text;
+                
+                if (suggestionMatch) {
+                    const rawOptions = suggestionMatch[1];
+                    const options = rawOptions.split('|').map(o => o.trim());
+                    setSuggestions(options); // Update UI buttons
+                    
+                    // Remove the suggestions from the spoken text
+                    cleanText = text.replace(/<<.+?>>/, '').trim();
+                }
+
+                if (cleanText) {
+                    queueAudio(cleanText);
+                }
+            };
+
             const setupRecognition = () => {
                 if (!window.SpeechRecognition && !window.webkitSpeechRecognition) return;
                 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -268,21 +302,13 @@ async def serve_ui():
                 recognition.current.continuous = true; 
                 recognition.current.interimResults = true;
                 
-                // IMPORTANT: AUTO-RESTART LOGIC
                 recognition.current.onend = () => {
-                    // If we are supposed to be listening, but browser stopped it, RESTART.
                     if (shouldListen.current && !isProcessingAudio.current) {
-                        try {
-                            console.log("Auto-restarting microphone...");
-                            recognition.current.start(); 
-                        } catch(e) {
-                            console.log("Mic restart ignored (already active)");
-                        }
+                        try { recognition.current.start(); } catch(e) {}
                     }
                 };
 
                 recognition.current.onresult = (event) => {
-                    // Strict Discipline: Ignore input if AI is speaking/thinking
                     if (isProcessingAudio.current || state === "thinking") return; 
 
                     let finalTranscript = "";
@@ -292,8 +318,6 @@ async def serve_ui():
 
                     if (finalTranscript.length > 0) {
                         setTranscript(finalTranscript);
-                        
-                        // 2.5s WAIT FOR HUMAN TO FINISH
                         if (silenceTimer.current) clearTimeout(silenceTimer.current);
                         silenceTimer.current = setTimeout(() => {
                             sendToAi(finalTranscript);
@@ -303,13 +327,12 @@ async def serve_ui():
             };
 
             const sendToAi = (text) => {
-                // Pause listening while AI thinks
                 recognition.current.stop(); 
                 setState("thinking");
+                setSuggestions([]); // Clear old suggestions
                 ws.current.send(text);
             };
 
-            // --- SPEECH OUTPUT ---
             const queueAudio = (text) => {
                 audioQueue.current.push(text);
                 if (!isProcessingAudio.current) {
@@ -319,9 +342,7 @@ async def serve_ui():
 
             const playNextSentence = () => {
                 if (audioQueue.current.length === 0) {
-                    // FINISHED SPEAKING -> RESUME LISTENING
                     isProcessingAudio.current = false;
-                    
                     if (shouldListen.current) {
                         setState("listening");
                         setTranscript(""); 
@@ -339,26 +360,21 @@ async def serve_ui():
                 setTranscript(txt); 
 
                 const utter = new SpeechSynthesisUtterance(txt);
-                
                 const voices = synth.getVoices();
                 let v = voices.find(v => v.name.includes("Google US English"));
                 if(!v) v = voices.find(v => v.name.includes("Zira"));
                 if(v) utter.voice = v;
-
                 utter.rate = 1.0; 
                 utter.onend = () => { playNextSentence(); };
                 synth.speak(utter);
             };
 
-            // --- TOGGLE BUTTON ---
             const toggleSession = () => {
                 if (!shouldListen.current) {
-                    // START
                     shouldListen.current = true;
                     setState("listening");
                     try { recognition.current.start(); } catch(e){}
                 } else {
-                    // STOP
                     shouldListen.current = false;
                     setState("idle");
                     recognition.current.stop();
@@ -367,26 +383,26 @@ async def serve_ui():
                 }
             };
 
+            // CLICKING A SUGGESTION
+            const clickSuggestion = (text) => {
+                setTranscript(text);
+                sendToAi(text);
+            };
+
             return (
                 <div className="flex flex-col items-center justify-between w-full max-w-lg h-[80vh]">
                     
                     <div className="flex flex-col items-center space-y-2 mt-10">
-                        <div className={`status-badge ${state === 'idle' ? '' : 'active'}`}>
-                            {state === 'listening' ? 'Listening' : state === 'thinking' ? 'Processing' : state === 'speaking' ? 'Speaking' : 'Standby'}
+                        <div className="text-xs font-bold text-slate-500 tracking-widest uppercase mb-1">
+                            {state === 'idle' ? 'OFFLINE' : 'LIVE CONNECTION'}
                         </div>
                         <h1 className="text-2xl font-light tracking-wide text-white opacity-90">
                             {role === 'luxury_sales' ? 'Elizabeth' : 'James'}
                         </h1>
-                        <p className="text-xs text-slate-400 font-medium tracking-widest uppercase">
-                            {role === 'luxury_sales' ? 'Private Client Advisor' : 'Success Manager'}
-                        </p>
                     </div>
 
                     <div className="flex-1 flex items-center justify-center w-full relative">
-                        <div 
-                            className={`core-orb ${state}`} 
-                            onClick={toggleSession}
-                        >
+                        <div className={`core-orb ${state}`} onClick={toggleSession}>
                             <div className="ring-pulse"></div>
                             <i className={`fas fa-${
                                 state === 'listening' ? 'microphone' : 
@@ -396,32 +412,39 @@ async def serve_ui():
                         </div>
                     </div>
 
-                    <div className="w-full px-6 mb-12">
-                        <div className="glass-panel rounded-2xl p-6 min-h-[120px] flex items-center justify-center text-center">
+                    <div className="w-full px-6 mb-4 flex flex-col items-center">
+                        <div className="glass-panel rounded-2xl p-6 min-h-[100px] w-full flex items-center justify-center text-center mb-6">
                             {transcript ? (
-                                <p className="text-lg font-light leading-relaxed text-slate-100 transition-all duration-500">
-                                    "{transcript}"
-                                </p>
+                                <p className="text-lg font-light leading-relaxed text-slate-100">"{transcript}"</p>
                             ) : (
-                                <p className="text-sm text-slate-500 font-light italic">
-                                    {state === 'idle' ? 'Tap the center button to begin.' : '...'}
-                                </p>
+                                <p className="text-sm text-slate-500 font-light italic">Ready.</p>
                             )}
                         </div>
+
+                        {/* SUGGESTION CHIPS */}
+                        {suggestions.length > 0 && state !== 'thinking' && (
+                            <div className="flex flex-wrap justify-center gap-2 animate-pulse">
+                                {suggestions.map((s, i) => (
+                                    <button key={i} onClick={() => clickSuggestion(s)} className="suggestion-btn">
+                                        {s}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
                     </div>
 
                     <div className="flex gap-4 mb-8">
                         <button 
-                            onClick={() => setRole('luxury_sales')}
-                            className={`px-6 py-3 rounded-xl text-xs font-bold tracking-wider transition-all duration-300 ${role === 'luxury_sales' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+                            onClick={() => { setRole('luxury_sales'); setSuggestions([]); }}
+                            className={`px-6 py-3 rounded-xl text-xs font-bold tracking-wider transition-all duration-300 ${role === 'luxury_sales' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
                         >
-                            CONSULTANT
+                            ELIZABETH
                         </button>
                         <button 
-                            onClick={() => setRole('default')}
-                            className={`px-6 py-3 rounded-xl text-xs font-bold tracking-wider transition-all duration-300 ${role === 'default' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/30' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+                            onClick={() => { setRole('default'); setSuggestions([]); }}
+                            className={`px-6 py-3 rounded-xl text-xs font-bold tracking-wider transition-all duration-300 ${role === 'default' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}
                         >
-                            MANAGER
+                            JAMES
                         </button>
                     </div>
 
